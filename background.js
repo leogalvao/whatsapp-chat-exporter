@@ -3,21 +3,24 @@
 
 // Listen for messages from content script and popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // BUG-03 fix: Only return true for async handlers; close channel immediately
+  // for everything else to avoid "async response never sent" warnings.
   if (message.action === 'download') {
-    handleDownload(message.url, message.filename);
-    sendResponse({ success: true });
+    handleDownload(message.url, message.filename)
+      .then(() => sendResponse({ success: true }))
+      .catch(e => sendResponse({ success: false, error: e.message }));
+    return true; // async — keep channel open
   }
-  
+
   // progressUpdate messages are sent by the content script directly to all
   // extension views (including the popup) via chrome.runtime.sendMessage.
-  // No forwarding needed here — doing so would cause the popup to process
-  // each update twice.
+  // No forwarding needed here.
   if (message.action === 'progressUpdate') {
-    sendResponse({});
+    // No response needed — return false (default) to close channel
     return;
   }
 
-  return true;
+  // Unknown action — close channel immediately
 });
 
 // Handle file downloads
@@ -30,7 +33,7 @@ async function handleDownload(url, filename) {
     });
   } catch (error) {
     console.error('Download error:', error);
-    
+
     // Retry with saveAs dialog
     try {
       await chrome.downloads.download({
@@ -40,6 +43,7 @@ async function handleDownload(url, filename) {
       });
     } catch (retryError) {
       console.error('Download retry failed:', retryError);
+      throw retryError;
     }
   }
 }
@@ -48,20 +52,13 @@ async function handleDownload(url, filename) {
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
     console.log('WhatsApp Chat Exporter installed');
-    
-    // Open WhatsApp Web in a new tab on install (optional)
-    // chrome.tabs.create({ url: 'https://web.whatsapp.com' });
   } else if (details.reason === 'update') {
     console.log('WhatsApp Chat Exporter updated to version', chrome.runtime.getManifest().version);
   }
 });
 
-// Handle extension icon click when not on WhatsApp Web
-chrome.action.onClicked.addListener((tab) => {
-  if (!tab.url || !tab.url.includes('web.whatsapp.com')) {
-    // Open WhatsApp Web if not already there
-    chrome.tabs.create({ url: 'https://web.whatsapp.com' });
-  }
-});
+// BUG-08 fix: Removed dead action.onClicked handler — the manifest declares
+// default_popup so onClicked never fires. If a "navigate to WhatsApp" action
+// is desired, it should be a button in the popup UI instead.
 
 console.log('WhatsApp Chat Exporter background service worker loaded');

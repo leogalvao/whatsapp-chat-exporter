@@ -377,17 +377,39 @@ body {
   flex-shrink: 0;
 }
 
-.chat-list-item span {
+.chat-list-item .chat-item-name {
   font-size: 13px;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
 }
 
-.chat-list-item.done span {
+/* IMP-04: Per-chat progress indicators */
+.chat-item-status {
+  font-size: 12px;
+  min-width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.chat-list-item.done .chat-item-name {
   color: var(--text-muted);
   text-decoration: line-through;
+}
+
+.chat-list-item.done .chat-item-status {
+  color: var(--accent);
+}
+
+.chat-list-item.exporting .chat-item-status {
+  color: var(--warning);
+  animation: pulse 1s infinite;
+}
+
+.chat-list-item.failed .chat-item-status {
+  color: var(--error);
 }
 
 .chat-count {
@@ -446,6 +468,31 @@ body {
   margin-top: 10px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* IMP-05: Cancel button */
+.cancel-btn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px;
+  background: transparent;
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  color: var(--error);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cancel-btn:hover {
+  background: rgba(241, 92, 109, 0.1);
+}
+
+.cancel-btn.hidden {
+  display: none;
 }
 
 /* Buttons */

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WhatsApp Chat Exporter",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Export your WhatsApp Web chats to JSON with organized media folders",
   "permissions": [
     "activeTab",
