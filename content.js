@@ -406,6 +406,27 @@
       await sleep(500);
     }
 
+    // Fallback: find the scrollable ancestor of message elements.
+    // WhatsApp may have removed data-testid and role attributes from the
+    // scroll container, so walk up from a known message element.
+    if (!scrollContainer) {
+      log('Scroll container not found via selectors, trying ancestor walk');
+      const msgEl = document.querySelector('#main [data-id]');
+      if (msgEl) {
+        let parent = msgEl.parentElement;
+        while (parent && parent !== document.body && parent.id !== 'main') {
+          const style = getComputedStyle(parent);
+          if ((style.overflowY === 'auto' || style.overflowY === 'scroll')
+              && parent.scrollHeight > parent.clientHeight) {
+            scrollContainer = parent;
+            log(`Found scroll container via ancestor walk: tag=${parent.tagName}, class=${parent.className?.substring(0, 60)}`);
+            break;
+          }
+          parent = parent.parentElement;
+        }
+      }
+    }
+
     if (!scrollContainer) {
       log('ERROR: Could not find scroll container after 10 s of retries');
       return null;
@@ -563,7 +584,8 @@
 
       // Strategy 8: Direct children of conversation body with content
       const convBody = mainPanel.querySelector('[data-testid="conversation-panel-body"]')
-                    || mainPanel.querySelector('[role="application"]');
+                    || mainPanel.querySelector('[role="application"]')
+                    || (scrollContainer || null);
       if (convBody) {
         const children = convBody.querySelectorAll(':scope > div > div');
         const candidates = [];
@@ -929,6 +951,35 @@
       headerChanged = await waitForHeaderChange(chatName, preClickHeader, 4000);
     }
 
+    // Final fallback: verify via message content change instead of header.
+    // This handles cases where WhatsApp removed the <header> element or
+    // changed the title/span structure so header verification always fails.
+    if (!headerChanged) {
+      log('openChat: header verification failed, trying message-based fallback');
+      // Give the DOM a moment to settle after the last click attempt
+      await sleep(1500);
+      const postClickIds = new Set(
+        Array.from(document.querySelectorAll('#main [data-id]'))
+          .slice(0, 5)
+          .map(el => el.getAttribute('data-id'))
+      );
+      const hasNewMessages = [...postClickIds].some(id => id && !preClickMessageIds.has(id));
+      if (hasNewMessages || (preClickMessageIds.size === 0 && postClickIds.size > 0)) {
+        log('openChat: message content changed — considering chat switch successful');
+        headerChanged = true;
+      }
+    }
+
+    // Final-final fallback: check if #main textContent contains the chat name
+    // (covers the case where the chat was already open before clicking).
+    if (!headerChanged) {
+      const mainText = document.querySelector('#main')?.textContent?.substring(0, 1000) || '';
+      if (mainText.includes(chatName)) {
+        log('openChat: chat name found in #main text — considering already open');
+        headerChanged = true;
+      }
+    }
+
     if (!headerChanged) {
       log(`ERROR: Chat did not switch to "${chatName}" after all attempts`);
       return false;
@@ -949,19 +1000,50 @@
   // Uses MutationObserver to detect actual DOM changes rather than polling.
   function waitForHeaderChange(expectedName, previousName, timeoutMs) {
     return new Promise((resolve) => {
-      const headerContainer = document.querySelector('#main header');
+      // Try <header> first, then fall back to the first child section of #main
+      // (WhatsApp may have replaced <header> with a plain <div>).
+      const mainEl = document.querySelector('#main');
+      const headerContainer = mainEl?.querySelector('header')
+                           || mainEl?.firstElementChild;
       if (!headerContainer) {
         resolve(false);
         return;
       }
 
       const getTitle = () => {
-        return headerContainer.querySelector('[title]')?.getAttribute('title') ||
-               headerContainer.querySelector('span[dir="auto"]')?.textContent?.trim() || '';
+        // Approach 1: [title] attribute (old WhatsApp)
+        const titleEl = headerContainer.querySelector('[title]');
+        if (titleEl) return titleEl.getAttribute('title');
+
+        // Approach 2: First meaningful span text (skip timestamps/status)
+        const spans = headerContainer.querySelectorAll('span[dir="auto"], span[dir="ltr"]');
+        for (const span of spans) {
+          const text = span.textContent?.trim();
+          if (text && text.length > 1 && text.length < 100
+              && !/^\d{1,2}:\d{2}/.test(text)
+              && !/^(click here|tap here|online|offline|last seen|typing)/i.test(text)) {
+            return text;
+          }
+        }
+
+        // Approach 3: img alt (contact photo alt text)
+        const img = headerContainer.querySelector('img[alt]');
+        if (img?.alt) return img.alt;
+
+        return '';
+      };
+
+      // Use includes() matching: the header may contain extra text like
+      // status/last-seen alongside the name.
+      const matches = (title) => {
+        if (!title) return false;
+        return title === expectedName
+            || title.includes(expectedName)
+            || expectedName.includes(title);
       };
 
       // Check immediately — the click may have already taken effect
-      if (getTitle() === expectedName) {
+      if (matches(getTitle())) {
         resolve(true);
         return;
       }
@@ -969,7 +1051,7 @@
       let resolved = false;
       const observer = new MutationObserver(() => {
         if (resolved) return;
-        if (getTitle() === expectedName) {
+        if (matches(getTitle())) {
           resolved = true;
           observer.disconnect();
           resolve(true);
@@ -981,14 +1063,13 @@
         subtree: true,
         characterData: true,
         attributes: true,
-        attributeFilter: ['title'],
       });
 
       setTimeout(() => {
         if (!resolved) {
           observer.disconnect();
           // Final snapshot check
-          resolve(getTitle() === expectedName);
+          resolve(matches(getTitle()));
         }
       }, timeoutMs);
     });
@@ -1264,6 +1345,10 @@
     // No data-id: could be a system message OR an album/gallery container.
     // Album containers hold real images so we must not discard them.
     if (!dataId) {
+      // Check 0: data-pre-plain-text or message-in/message-out = real message
+      if (el.querySelector('[data-pre-plain-text]')) return false;
+      if (el.querySelector('.message-in, .message-out')) return false;
+
       // Check 1: Loaded media (images with blob/media src, video, audio, docs)
       const hasMedia = el.querySelector(
         'img[src*="blob:"], img[src*="media"], video, ' +
@@ -1477,7 +1562,9 @@
       let textEl = null;
 
       // Strategy 1: data-testid (most stable — works for text and captions)
-      textEl = msgEl.querySelector('[data-testid="msg-text"]');
+      // WhatsApp renamed msg-text → selectable-text circa 2026.
+      textEl = msgEl.querySelector('[data-testid="msg-text"]')
+            || msgEl.querySelector('[data-testid="selectable-text"]');
 
       // Strategies 2–5 only for non-media messages to prevent garbage.
       if (!textEl && !_hasMediaEl) {
