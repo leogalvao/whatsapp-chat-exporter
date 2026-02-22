@@ -95,6 +95,11 @@
           <span class="radio-custom"></span>
           <span>CSV (Excel / Sheets)</span>
         </label>
+        <label class="checkbox-label">
+          <input type="radio" name="export-format" value="txt" id="format-txt">
+          <span class="radio-custom"></span>
+          <span>TXT (WhatsApp native)</span>
+        </label>
       </div>
 
       <!-- Progress section (hidden by default) -->
@@ -107,6 +112,7 @@
           <div class="progress-fill" id="progress-fill"></div>
         </div>
         <p id="progress-detail" class="progress-detail">Preparing export...</p>
+        <button id="cancel-btn" class="cancel-btn hidden">Cancel Export</button>
       </div>
 
       <!-- Export button -->

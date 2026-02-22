@@ -4,12 +4,12 @@
 (function() {
   'use strict';
 
-  // Prevent multiple injections — if the script was already loaded, exit
-  // immediately to avoid registering duplicate message listeners.
-  if (window.__whatsappExporterLoaded) {
-    console.log('[WA Exporter] Already loaded — skipping re-injection');
-    return;
-  }
+  // BUG-01 fix: Read the guard flag but do NOT return early.  When Chrome
+  // invalidates the content-script context (extension update, etc.) the old
+  // listener is dead but window.__whatsappExporterLoaded persists.  Re-injection
+  // must always re-register the listener.  The flag is still used to skip
+  // one-time initialisation code further down.
+  const _alreadyLoaded = window.__whatsappExporterLoaded;
   window.__whatsappExporterLoaded = true;
 
   // Debug mode - set to false to suppress console logs
@@ -17,6 +17,106 @@
 
   function log(...args) {
     if (DEBUG) console.log('[WA Exporter]', ...args);
+  }
+
+  // -----------------------------------------------------------------------
+  // IMP-08: Centralised selector registry — one place to update when
+  // WhatsApp changes its DOM.
+  // -----------------------------------------------------------------------
+  const SELECTORS = {
+    chatList: [
+      '[data-testid="cell-frame-container"]',
+      '[data-testid="list-item-link"]',
+      '[aria-label="Chat list"] [role="listitem"]',
+      '#pane-side [role="listitem"]',
+      '#pane-side [role="row"]',
+    ],
+    chatListFallback: '#pane-side [tabindex="-1"]',
+    chatName: ['[title]', 'span[dir="auto"]', 'span[title]'],
+    scrollContainer: [
+      '[data-testid="conversation-panel-body"]',
+      '#main [role="application"]',
+      '#main .copyable-area > div',
+    ],
+    dateDivider: [
+      '[data-testid="date-divider"]',
+      '[data-testid="msg-date-divider"]',
+    ],
+    dateDividerWildcard: '[data-testid*="date"]',
+    msgContainer: '[data-testid="msg-container"]',
+    msgMeta: '[data-testid="msg-meta"]',
+    msgText: '[data-testid="msg-text"]',
+    author: [
+      '[data-testid="msg-author-title"]',
+      '[data-testid="author"]',
+      'span[aria-label*="@"]',
+      '[data-testid="msg-author"]',
+      '[data-testid="msg-author-name"]',
+    ],
+    image: 'img[src*="blob:"], img[src*="media"]',
+    video: '[data-testid*="video"], video',
+    audio: '[data-testid*="ptt"], [data-testid*="audio"]',
+    document: '[data-testid*="document"]',
+    systemMsg: '[data-testid="msg-system"]',
+    reactions: '[data-testid="reactions"]',
+    forwarded: '[data-testid*="forwarded"], [data-testid="forward-refreshed"]',
+    deleted: '[data-icon="recalled"]',
+    outgoing: '[data-icon="msg-dblcheck"], [data-icon="msg-check"], [data-testid="msg-dblcheck"], [data-testid="msg-check"]',
+    quotedMessage: '[data-testid="quoted-message"]',
+    quotedAuthor: '[data-testid="quoted-message-author"]',
+    quotedText: '[data-testid="quoted-message-text"]',
+    header: '#main header',
+    sidePanel: '#pane-side',
+    mainPanel: '#main',
+    conversationBody: '[data-testid="conversation-panel-body"]',
+    conversationBodyFallback: '[role="application"]',
+  };
+
+  // BUG-02: Selector probe — validates which selectors actually match the
+  // live DOM.  Logs results and returns the first working chat-list selector.
+  function selectorProbe() {
+    const results = {};
+    let chatListSelector = null;
+    for (const sel of SELECTORS.chatList) {
+      const count = document.querySelectorAll(sel).length;
+      results[sel] = count;
+      if (count > 0 && !chatListSelector) chatListSelector = sel;
+    }
+    const mainPanel = document.querySelector(SELECTORS.mainPanel);
+    results['#main'] = mainPanel ? 'found' : 'NOT FOUND';
+    log('Selector probe:', results);
+    return { results, chatListSelector, healthy: chatListSelector !== null };
+  }
+
+  // IMP-02: Global abort controller for the current export
+  let currentAbortController = null;
+
+  // BUG-07: Detected date-part order ('mdy' or 'dmy') — set once at load
+  let detectedDateOrder = null;
+
+  function detectDateLocale() {
+    const lang = (document.documentElement?.lang || '').toLowerCase();
+    if (lang.startsWith('en-us') || lang === 'en') return 'mdy';
+    const dmyPrefixes = [
+      'pt','es','fr','de','it','nl','ru','ar','hi','tr','pl','uk','ro',
+      'el','cs','sv','da','fi','no','hu','bg','hr','sk','sl','sr','lt','lv','et'
+    ];
+    for (const p of dmyPrefixes) { if (lang.startsWith(p)) return 'dmy'; }
+    // Fallback: sniff UI strings
+    const sample = (document.body?.textContent || '').substring(0, 5000);
+    if (/Escribe un mensaje|Escreva uma mensagem|Écrivez un message|Nachricht eingeben|Scrivi un messaggio/.test(sample)) return 'dmy';
+    if (sample.includes('Type a message')) return 'mdy';
+    return null;
+  }
+
+  // --- One-time initialisation (skipped on re-injection) ---
+  if (!_alreadyLoaded) {
+    detectedDateOrder = detectDateLocale();
+    log('Detected date locale order:', detectedDateOrder || 'unknown');
+    setTimeout(() => selectorProbe(), 3000);
+  } else {
+    log('Re-injection detected — re-registering message listener');
+    detectedDateOrder = detectDateLocale();
   }
 
   // Store for extracted data
@@ -37,22 +137,66 @@
   async function handleMessage(message, sendResponse) {
     try {
       switch (message.action) {
-        case 'getChats':
-          const chats = await getChatList();
-          sendResponse({ success: true, chats: chats });
+        // IMP-01: Health-check ping
+        case 'ping':
+          sendResponse({ pong: true, version: '1.5' });
           break;
 
-        case 'exportChat':
-          const result = await exportChat(message.options);
-          sendResponse(result);
+        case 'getChats': {
+          const chats = await getChatList();
+          if (chats.length === 0) {
+            // BUG-02: Surface clear error when zero selectors match
+            const probe = selectorProbe();
+            if (!probe.healthy) {
+              sendResponse({
+                success: false,
+                error: 'DOM_CHANGED',
+                detail: 'No chat-list selectors matched the current WhatsApp Web DOM. The page structure may have changed.'
+              });
+              return;
+            }
+          }
+          sendResponse({ success: true, chats: chats });
+          break;
+        }
+
+        case 'exportChat': {
+          // IMP-02: Create abort controller for this export
+          currentAbortController = new AbortController();
+          const opts = message.options || {};
+          opts._signal = currentAbortController.signal;
+          // BUG-10: Carry session ID for progress filtering
+          if (message.sessionId) opts._sessionId = message.sessionId;
+          try {
+            const result = await exportChat(opts);
+            sendResponse(result);
+          } finally {
+            currentAbortController = null;
+          }
+          break;
+        }
+
+        // IMP-02: Cancel a running export
+        case 'cancelExport':
+          if (currentAbortController) {
+            currentAbortController.abort();
+            sendResponse({ success: true });
+          } else {
+            sendResponse({ success: false, error: 'No export in progress' });
+          }
           break;
 
         default:
           sendResponse({ success: false, error: 'Unknown action' });
       }
     } catch (error) {
-      console.error('WhatsApp Exporter Error:', error);
-      sendResponse({ success: false, error: error.message });
+      if (error.name === 'AbortError') {
+        log('Export cancelled by user');
+        sendResponse({ success: false, error: 'Export cancelled', cancelled: true });
+      } else {
+        console.error('WhatsApp Exporter Error:', error);
+        sendResponse({ success: false, error: error.message });
+      }
     }
   }
 
@@ -65,14 +209,8 @@
     log('getChatList: Starting scan...');
 
     while (attempts < maxRetries) {
-      // Try multiple selector strategies
-      const selectors = [
-        '[data-testid="cell-frame-container"]',
-        '[data-testid="list-item-link"]',
-        '[aria-label="Chat list"] [role="listitem"]',
-        '#pane-side [role="listitem"]',
-        '#pane-side [role="row"]',
-      ];
+      // Try multiple selector strategies (IMP-08: from central registry)
+      const selectors = SELECTORS.chatList;
 
       let chatElements = [];
 
@@ -85,9 +223,9 @@
       }
 
       if (chatElements.length === 0) {
-        const sidePanel = document.querySelector('#pane-side');
+        const sidePanel = document.querySelector(SELECTORS.sidePanel);
         if (sidePanel) {
-          chatElements = sidePanel.querySelectorAll('[tabindex="-1"]');
+          chatElements = sidePanel.querySelectorAll(SELECTORS.chatListFallback);
           if (chatElements.length > 0) {
             log(`Fallback: found ${chatElements.length} potential chats via tabindex`);
           }
@@ -143,6 +281,9 @@
 
   // Export selected chat
   async function exportChat(options) {
+    // BUG-10: Track session ID for progress filtering
+    _currentSessionId = options._sessionId || null;
+
     exportData = {
       chatName: options.chatName,
       exportDate: new Date().toISOString(),
@@ -175,7 +316,7 @@
     const maxScrolls = scrollDepthMap[options.scrollDepth] || 30;
 
     sendProgress(15, 'Loading history...', 'Scrolling to load messages');
-    const scrollContainer = await scrollToLoadMessages(maxScrolls);
+    const scrollContainer = await scrollToLoadMessages(maxScrolls, options._signal);
 
     // Combined scroll-forward + extraction pass.
     // Scrolls through the entire chat from top to bottom, extracting messages
@@ -191,7 +332,7 @@
       log('WARNING: 0 messages found — retrying extraction after 3 s wait');
       sendProgress(30, 'Retrying extraction...', 'First pass found 0 messages, retrying');
       await sleep(3000);
-      const retryContainer = await scrollToLoadMessages(Math.min(maxScrolls, 30));
+      const retryContainer = await scrollToLoadMessages(Math.min(maxScrolls, 30), options._signal);
       result = await scrollAndExtractMessages(retryContainer || scrollContainer, options);
       log(`Retry result: ${result.messages.length} messages`);
     }
@@ -207,6 +348,12 @@
       await extractMedia(result.messages);
     }
 
+    // IMP-07: Validate export before download
+    const validation = validateExport(result.messages);
+    if (!validation.valid) {
+      log('Export validation warnings:', validation.warnings);
+    }
+
     sendProgress(90, 'Creating export...', 'Generating export file');
 
     if (options.returnData) {
@@ -218,7 +365,8 @@
         success: true,
         messageCount: result.messages.length,
         mediaCount: exportData.media.length,
-        files: files
+        files: files,
+        warnings: validation.warnings
       };
     }
 
@@ -229,13 +377,14 @@
     return {
       success: true,
       messageCount: result.messages.length,
-      mediaCount: exportData.media.length
+      mediaCount: exportData.media.length,
+      warnings: validation.warnings
     };
   }
 
   // Scroll to load more messages — accepts configurable max iterations.
   // Returns the scroll container so callers can reuse it.
-  async function scrollToLoadMessages(maxIterations) {
+  async function scrollToLoadMessages(maxIterations, signal) {
     const scrollSelectors = [
       '[data-testid="conversation-panel-body"]',
       '#main [role="application"]',
@@ -267,8 +416,8 @@
 
     for (let i = 0; i < maxIterations; i++) {
       scrollContainer.scrollTop = 0;
-      // Give WhatsApp more time to fetch and render older messages/images.
-      await sleep(2000);
+      // IMP-06: adaptive delay — resolves early when DOM settles, max 3 s
+      await adaptiveSleep(3000, signal);
 
       const newScrollHeight = scrollContainer.scrollHeight;
       if (newScrollHeight === prevScrollHeight) {
@@ -336,6 +485,7 @@
     }
 
     const seenIds = new Set();
+    const seenHashes = new Set(); // IMP-03: secondary dedup by content hash
     const messages = [];
     const systemMessages = [];
     let lastKnownDateString = null;
@@ -490,10 +640,9 @@
     for (let i = 0; i < positions.length; i++) {
       if (scrollContainer && positions[i] !== null) {
         scrollContainer.scrollTop = positions[i];
-        // Wait for WhatsApp to render this viewport (also triggers lazy-load
-        // of images so blob: URLs become available).  1500ms gives the DOM
-        // time to attach title / aria-label attributes on msg-meta elements.
-        await sleep(1500);
+        // IMP-06: Adaptive delay — resolves early when DOM settles, max 2 s.
+        // Also triggers lazy-load of images so blob: URLs become available.
+        await adaptiveSleep(2000, options?._signal);
       }
 
       // --- Date dividers visible in the current viewport ---
@@ -533,8 +682,16 @@
         const effectiveDateEntry = dateEntry
           || (lastKnownDateString ? { dateString: lastKnownDateString } : null);
 
-        const message = extractMessageData(msgEl, options, effectiveDateEntry);
+        const message = await extractMessageData(msgEl, options, effectiveDateEntry);
         if (message) {
+          // IMP-03: Secondary dedup by content hash for messages with
+          // missing or synthetic IDs (albums, generated containers).
+          const hash = messageContentHash(message);
+          if (!rawId && seenHashes.has(hash)) {
+            continue; // duplicate without a stable ID
+          }
+          seenHashes.add(hash);
+
           messages.push(message);
           // If the message itself yielded a date (via strategies A–C3),
           // feed it back so subsequent dateless messages can inherit it.
@@ -595,7 +752,12 @@
   // MouseEvents and a native .click() call.  Coordinates are derived from
   // the element's bounding rect so the events land inside the target.
   function simulateClick(el) {
-    const rect = el.getBoundingClientRect();
+    // BUG-09: Find the innermost interactive element first — React's fiber
+    // tree may only listen on <a>, [role="button"], or [tabindex] nodes.
+    const inner = el.querySelector('a, [role="button"], [tabindex]');
+    const target = inner || el;
+
+    const rect = target.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
 
@@ -623,15 +785,29 @@
     };
 
     // Phase 1: PointerEvents (React 18+ uses these)
-    el.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
-    el.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
+    target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
+    target.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
 
     // Phase 2: MouseEvents (fallback for older React builds)
-    el.dispatchEvent(new MouseEvent('mousedown', commonOpts));
-    el.dispatchEvent(new MouseEvent('mouseup', commonOpts));
+    target.dispatchEvent(new MouseEvent('mousedown', commonOpts));
+    target.dispatchEvent(new MouseEvent('mouseup', commonOpts));
 
     // Phase 3: Native click (triggers browser's own click pipeline)
-    el.click();
+    target.click();
+
+    // Phase 4: If we targeted an inner element, also fire on the original
+    if (inner && inner !== el) {
+      el.click();
+    }
+  }
+
+  // BUG-09: Keyboard-based click fallback for when pointer events don't
+  // propagate through React's synthetic event system.
+  function simulateKeyboardClick(el) {
+    el.focus();
+    const opts = { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 };
+    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keyup', opts));
   }
 
   // Open a specific chat by name.
@@ -686,13 +862,11 @@
       if (clickTarget) break;
     }
 
-    // Last resort: click by index
+    // BUG-05: Removed index-based fallback. Incoming messages can reorder
+    // the sidebar, making index unreliable. Name-based matching above is
+    // the only safe approach.
     if (!clickTarget) {
-      const rows = sidePanel.querySelectorAll('[data-testid="list-item-link"], [role="listitem"], [role="row"]');
-      if (rows[chatIndex]) {
-        clickTarget = rows[chatIndex];
-        log(`openChat: last resort — clicking by index ${chatIndex}`);
-      }
+      log(`WARNING: openChat could not find "${chatName}" by name in any selector strategy`);
     }
 
     if (!clickTarget) {
@@ -739,13 +913,20 @@
     }
 
     if (!headerChanged) {
-      // Last escalation: try clicking the parent of the original target
+      // Escalation 3: try clicking the parent of the original target
       log('openChat: second attempt failed, retrying on parent element');
       const parent = clickTarget.parentElement;
       if (parent && parent !== sidePanel) {
         simulateClick(parent);
         headerChanged = await waitForHeaderChange(chatName, preClickHeader, 6000);
       }
+    }
+
+    if (!headerChanged) {
+      // BUG-09 escalation 4: keyboard-based fallback
+      log('openChat: trying keyboard click fallback');
+      simulateKeyboardClick(clickTarget);
+      headerChanged = await waitForHeaderChange(chatName, preClickHeader, 4000);
     }
 
     if (!headerChanged) {
@@ -969,9 +1150,8 @@
 
     // Try numeric date formats explicitly before native Date.parse,
     // because native parsing of ambiguous formats is unreliable.
-    // Use the separator to pick the right convention:
-    //   dots  → European D.M.YYYY
-    //   slash → US M/D/YYYY (fallback D/M/YYYY if month > 12)
+    // BUG-07: Use detectedDateOrder (from HTML lang / UI strings) to
+    // resolve ambiguous slash-separated dates like "5/3/2026".
     const sepMatch = dateString.match(/[\/.:-]/);
     const parts = dateString.split(/[\/.:-]/);
     if (parts.length === 3) {
@@ -986,12 +1166,28 @@
         if (sep === '.' && b <= 12 && c >= 100) {
           return new Date(c, b - 1, a);
         }
-        // Slash separator → M/D/YYYY (US), fallback to D/M/YYYY
-        if (a <= 12 && c >= 100) {
-          return new Date(c, a - 1, b);
-        }
-        if (b <= 12 && c >= 100) {
-          return new Date(c, b - 1, a);
+        // Slash separator — use locale hint when available
+        if (c >= 100) {
+          if (detectedDateOrder === 'dmy' && b <= 12) {
+            return new Date(c, b - 1, a); // D/M/YYYY
+          }
+          if (detectedDateOrder === 'mdy' && a <= 12) {
+            return new Date(c, a - 1, b); // M/D/YYYY
+          }
+          // No locale hint — disambiguate by value range
+          if (a > 12 && b <= 12) return new Date(c, b - 1, a); // D/M/YYYY
+          if (b > 12 && a <= 12) return new Date(c, a - 1, b); // M/D/YYYY
+          // Both ≤ 12: prefer interpretation that gives date ≤ today
+          if (a <= 12 && b <= 12) {
+            const today = new Date();
+            const mdyDate = new Date(c, a - 1, b);
+            const dmyDate = new Date(c, b - 1, a);
+            if (mdyDate <= today && dmyDate > today) return mdyDate;
+            if (dmyDate <= today && mdyDate > today) return dmyDate;
+            return mdyDate; // default M/D/YYYY
+          }
+          if (a <= 12) return new Date(c, a - 1, b);
+          if (b <= 12) return new Date(c, b - 1, a);
         }
       }
     }
@@ -1143,7 +1339,7 @@
   // -----------------------------------------------------------------------
   // Extract data from a single message element
   // -----------------------------------------------------------------------
-  function extractMessageData(msgEl, options, dateEntry) {
+  async function extractMessageData(msgEl, options, dateEntry) {
     const message = {
       id: msgEl.getAttribute('data-id') || generateId(),
       type: 'text',
@@ -1492,6 +1688,18 @@
       message.type = 'image';
       message.media = { type: 'image', src: imageEl.src };
       if (!message.content) message.content = '[Image]';
+      // BUG-04: Fetch blob URL immediately while the element is visible in
+      // the viewport.  WhatsApp aggressively revokes blob URLs for off-screen
+      // images, so deferring to extractMedia() often fails.
+      if (imageEl.src.startsWith('blob:')) {
+        try {
+          const resp = await fetch(imageEl.src);
+          const blob = await resp.blob();
+          message.media._inlineBase64 = await blobToBase64(blob);
+        } catch (_e) {
+          log('BUG-04: Inline blob fetch failed (may already be revoked):', _e.message);
+        }
+      }
     } else if (videoEl) {
       message.type = 'video';
       message.media = { type: 'video' };
@@ -1579,13 +1787,25 @@
 
     for (let i = 0; i < mediaMessages.length; i++) {
       const msg = mediaMessages[i];
+      const filename = `${msg.media.type}_${i + 1}.${getExtension(msg.media.type)}`;
 
-      if (msg.media?.src?.startsWith('blob:')) {
+      // BUG-04: Use pre-fetched inline base64 if available (captured while
+      // the element was visible in the viewport during extraction).
+      if (msg.media._inlineBase64) {
+        exportData.media.push({
+          messageId: msg.id,
+          type: msg.media.type,
+          filename: filename,
+          base64: msg.media._inlineBase64
+        });
+        msg.media.exportedFilename = filename;
+        msg.media.src = filename;
+        delete msg.media._inlineBase64;
+      } else if (msg.media?.src?.startsWith('blob:')) {
         try {
           const response = await fetch(msg.media.src);
           const blob = await response.blob();
           const base64 = await blobToBase64(blob);
-          const filename = `${msg.media.type}_${i + 1}.${getExtension(msg.media.type)}`;
 
           exportData.media.push({
             messageId: msg.id,
@@ -1595,10 +1815,9 @@
           });
 
           msg.media.exportedFilename = filename;
-          // --- TASK 4: Replace blob URL with local filename ---
           msg.media.src = filename;
         } catch (error) {
-          log('Media extraction failed:', error);
+          log('Media extraction failed (blob likely revoked):', error);
         }
       }
 
@@ -1610,14 +1829,19 @@
   // Used when the popup writes files directly to a user-chosen directory
   // via the File System Access API (options.returnData = true).
   function buildExportFiles(chatName, format) {
-    const safeName = chatName.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+    const safeName = sanitizeFilename(chatName);
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const dt = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const baseDir = `${safeName}/${dt}`;
     const files = [];
 
-    if (format === 'csv') {
+    if (format === 'txt') {
+      files.push({
+        path: `${baseDir}/${safeName}.txt`,
+        content: generateTXT(exportData.messages)
+      });
+    } else if (format === 'csv') {
       files.push({
         path: `${baseDir}/${safeName}.csv`,
         content: '\uFEFF' + generateCSV(exportData.messages)
@@ -1631,7 +1855,7 @@
             exportDate: exportData.exportDate,
             totalMessages: exportData.messages.length,
             totalMedia: exportData.media.length,
-            exportedBy: 'WhatsApp Chat Exporter Extension v1.4'
+            exportedBy: 'WhatsApp Chat Exporter Extension v1.5'
           },
           messages: exportData.messages,
           systemMessages: exportData.systemMessages,
@@ -1660,13 +1884,17 @@
   // Folder structure: {chatName}/{YYYYMMDD_HHMMSS}/{chatName}.json
   //                   {chatName}/{YYYYMMDD_HHMMSS}/media/{file}
   async function downloadExport(chatName, format) {
-    const safeName = chatName.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+    const safeName = sanitizeFilename(chatName);
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const datetimeStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const baseDir = `${safeName}/${datetimeStr}`;
 
-    if (format === 'csv') {
+    if (format === 'txt') {
+      // IMP-09: WhatsApp-native TXT format
+      const txtContent = generateTXT(exportData.messages);
+      downloadFile(txtContent, `${baseDir}/${safeName}.txt`, 'text/plain;charset=utf-8');
+    } else if (format === 'csv') {
       const csvContent = generateCSV(exportData.messages);
       const csvWithBom = '\uFEFF' + csvContent;
       downloadFile(csvWithBom, `${baseDir}/${safeName}.csv`, 'text/csv;charset=utf-8');
@@ -1678,7 +1906,7 @@
           exportDate: exportData.exportDate,
           totalMessages: exportData.messages.length,
           totalMedia: exportData.media.length,
-          exportedBy: 'WhatsApp Chat Exporter Extension v1.4'
+          exportedBy: 'WhatsApp Chat Exporter Extension v1.5'
         },
         messages: exportData.messages,
         systemMessages: exportData.systemMessages,
@@ -1714,6 +1942,25 @@
         }
       }
     }
+  }
+
+  // IMP-09: Generate TXT in WhatsApp-native export format
+  function generateTXT(messages) {
+    const lines = [];
+    for (const msg of messages) {
+      const date = msg.date || '';
+      const time = msg.timestamp || '';
+      const sender = msg.sender || 'Unknown';
+      const content = msg.content || '';
+      if (date && time) {
+        lines.push(`[${date}, ${time}] ${sender}: ${content}`);
+      } else if (time) {
+        lines.push(`[${time}] ${sender}: ${content}`);
+      } else {
+        lines.push(`${sender}: ${content}`);
+      }
+    }
+    return lines.join('\n');
   }
 
   // --- TASK 8: Generate CSV from messages ---
@@ -1776,14 +2023,118 @@
     return 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
   }
 
-  function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  // IMP-10: Robust filename sanitization
+  function sanitizeFilename(name) {
+    let safe = (name || '').replace(/[^a-z0-9\s._-]/gi, '_');
+    // Handle names that become all-underscores or empty
+    if (!safe.replace(/[_\s]/g, '')) safe = 'chat_export';
+    // Remove leading/trailing dots, spaces, underscores
+    safe = safe.replace(/^[\s._]+|[\s._]+$/g, '');
+    // Windows reserved filenames
+    if (/^(CON|PRN|AUX|NUL|COM\d|LPT\d)$/i.test(safe)) safe = '_' + safe;
+    safe = safe.substring(0, 50).replace(/[\s.]+$/, '');
+    return safe || 'chat_export';
   }
 
+  // IMP-07: Validate export output before download
+  function validateExport(messages) {
+    const warnings = [];
+    if (messages.length === 0) {
+      warnings.push('No messages found. WhatsApp\'s page structure may have changed.');
+      return { valid: false, warnings };
+    }
+    const withSender = messages.filter(m => m.sender && m.sender.length > 0).length;
+    const senderPct = Math.round((withSender / messages.length) * 100);
+    if (senderPct < 80) {
+      warnings.push(`Only ${senderPct}% of messages have an identified sender.`);
+    }
+    const withDate = messages.filter(m => m.date).length;
+    const datePct = Math.round((withDate / messages.length) * 100);
+    if (datePct < 50) {
+      warnings.push(`Only ${datePct}% of messages have a date.`);
+    }
+    return { valid: warnings.length === 0, warnings };
+  }
+
+  // IMP-03: DJB2 hash of sender + timestamp + content prefix for dedup
+  function messageContentHash(msg) {
+    const key = `${msg.sender || ''}|${msg.timestamp || ''}|${(msg.content || '').substring(0, 100)}`;
+    let hash = 5381;
+    for (let i = 0; i < key.length; i++) {
+      hash = ((hash << 5) + hash) + key.charCodeAt(i);
+      hash |= 0;
+    }
+    return hash.toString(36);
+  }
+
+  // IMP-02: sleep with optional AbortSignal support
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
+      const timer = setTimeout(resolve, ms);
+      if (signal) {
+        const onAbort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  // IMP-06: Adaptive sleep — resolves early once DOM mutations settle
+  // (no new mutations for 300 ms), with a hard cap of maxMs.
+  function adaptiveSleep(maxMs, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
+      const panel = document.querySelector(SELECTORS.mainPanel);
+      if (!panel) return sleep(maxMs, signal).then(resolve, reject);
+
+      let resolved = false;
+      let settleTimer = null;
+      let maxTimer = null;
+
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        observer.disconnect();
+        clearTimeout(settleTimer);
+        clearTimeout(maxTimer);
+        resolve();
+      };
+
+      const observer = new MutationObserver(() => {
+        clearTimeout(settleTimer);
+        settleTimer = setTimeout(done, 300);
+      });
+      observer.observe(panel, { childList: true, subtree: true });
+
+      // If no mutations at all, settle after 300 ms
+      settleTimer = setTimeout(done, 300);
+      // Hard cap
+      maxTimer = setTimeout(done, maxMs);
+
+      if (signal) {
+        const onAbort = () => {
+          if (!resolved) {
+            resolved = true;
+            observer.disconnect();
+            clearTimeout(settleTimer);
+            clearTimeout(maxTimer);
+            reject(new DOMException('Aborted', 'AbortError'));
+          }
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  // BUG-10: Include sessionId so the popup can filter stale progress messages
+  let _currentSessionId = null;
+
   function sendProgress(percent, label, detail) {
-    chrome.runtime.sendMessage({ action: 'progressUpdate', percent, label, detail })
+    const msg = { action: 'progressUpdate', percent, label, detail };
+    if (_currentSessionId) msg.sessionId = _currentSessionId;
+    chrome.runtime.sendMessage(msg)
       .catch(() => {}); // Suppress rejection when popup is not open
   }
 
-  log('WhatsApp Chat Exporter loaded (v1.4 - date/time reliability fixes)');
+  log('WhatsApp Chat Exporter loaded (v1.5 - audit fixes)');
 })();
