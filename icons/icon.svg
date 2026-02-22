@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#25D366"/>
+      <stop offset="100%" stop-color="#075E54"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="url(#bg)"/>
+  
+  <!-- Chat bubble -->
+  <path d="M64 28C44.12 28 28 42.12 28 60c0 6.78 2.16 13.06 5.84 18.24L28 100l23.04-5.96C56.04 96.68 59.88 98 64 98c19.88 0 36-14.12 36-32S83.88 28 64 28z" fill="white" fill-opacity="0.95"/>
+  
+  <!-- Download arrow -->
+  <path d="M64 48v24M54 62l10 10 10-10" stroke="#075E54" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  
+  <!-- Download base line -->
+  <path d="M50 78h28" stroke="#075E54" stroke-width="4" stroke-linecap="round"/>
+</svg>
