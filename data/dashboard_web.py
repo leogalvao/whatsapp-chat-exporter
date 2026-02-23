@@ -716,7 +716,22 @@ _FOLDER_UPLOAD_JS = """
         inp.style.display = 'none';
         document.body.appendChild(inp);
 
-        btn.addEventListener('click', function() { inp.click(); });
+        var totalUploaded = 0;
+        var folderCount = 0;
+        var uploading = false;
+
+        var doneBtn = document.createElement('a');
+        doneBtn.textContent = 'Done — Reload Dashboard';
+        doneBtn.style.cssText = 'display:none;cursor:pointer;text-decoration:underline;color:#198754;font-weight:bold;margin-left:10px;';
+        btn.parentNode.appendChild(document.createElement('br'));
+        btn.parentNode.appendChild(doneBtn);
+
+        doneBtn.addEventListener('click', function() { window.location.reload(); });
+
+        btn.addEventListener('click', function() {
+            if (uploading) return;
+            inp.click();
+        });
 
         inp.addEventListener('change', function() {
             if (!inp.files || inp.files.length === 0) return;
@@ -730,34 +745,32 @@ _FOLDER_UPLOAD_JS = """
             }
             if (count === 0) {
                 alert('No JSON files found in the selected folder.');
+                inp.value = '';
                 return;
             }
+            uploading = true;
             btn.textContent = 'Uploading ' + count + ' file(s)...';
             btn.style.color = '#0d6efd';
 
             fetch('/api/upload-folder', { method: 'POST', body: formData })
             .then(function(r) { return r.json(); })
             .then(function(data) {
+                uploading = false;
                 if (data.saved && data.saved.length > 0) {
-                    btn.textContent = data.saved.length + ' file(s) uploaded!';
+                    totalUploaded += data.saved.length;
+                    folderCount++;
+                    btn.innerHTML = totalUploaded + ' file(s) from ' + folderCount + ' folder(s) uploaded<br>Click to add another folder';
                     btn.style.color = '#198754';
-                    setTimeout(function() { window.location.reload(); }, 800);
+                    doneBtn.style.display = 'inline';
                 } else {
-                    btn.textContent = 'No valid exports found';
+                    btn.textContent = 'No valid exports found — click to try again';
                     btn.style.color = '#dc3545';
-                    setTimeout(function() {
-                        btn.textContent = 'Upload Folder';
-                        btn.style.color = '#495057';
-                    }, 3000);
                 }
             })
             .catch(function(e) {
-                btn.textContent = 'Upload failed';
+                uploading = false;
+                btn.textContent = 'Upload failed — click to retry';
                 btn.style.color = '#dc3545';
-                setTimeout(function() {
-                    btn.textContent = 'Upload Folder';
-                    btn.style.color = '#495057';
-                }, 3000);
             });
             inp.value = '';
         });
