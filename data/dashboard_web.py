@@ -14,7 +14,7 @@ import json
 import os
 import re
 import unicodedata
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -369,6 +369,58 @@ DATE_MIN = _date_col.min().date() if not _date_col.empty else date(2026, 2, 8)
 DATE_MAX = _date_col.max().date() if not _date_col.empty else date(2026, 2, 8)
 ALL_DATES = sorted(DF_ALL["msg_date"].dropna().dt.date.unique())
 
+
+# ── Deployment computation ────────────────────────────────────────────────────
+
+def _compute_deployments(dates, gap_hours=24):
+    """Group sorted dates into deployments separated by gaps > gap_hours.
+
+    Returns list of dicts: {id, label, start_date, end_date, days}.
+    """
+    if not dates:
+        return []
+    deployments = []
+    current_start = dates[0]
+    current_end = dates[0]
+    for d in dates[1:]:
+        gap_days = (d - current_end).days
+        if gap_days <= (gap_hours / 24):
+            current_end = d
+        else:
+            deployments.append({
+                "start_date": current_start,
+                "end_date": current_end,
+            })
+            current_start = d
+            current_end = d
+    deployments.append({
+        "start_date": current_start,
+        "end_date": current_end,
+    })
+    for i, dep in enumerate(deployments, 1):
+        dep["id"] = i
+        s = dep["start_date"]
+        e = dep["end_date"]
+        dep["days"] = (e - s).days + 1
+        if s.month == e.month:
+            dep["label"] = f"{s.strftime('%b %d')}\u2013{e.strftime('%d')}"
+        else:
+            dep["label"] = f"{s.strftime('%b %d')}\u2013{e.strftime('%b %d')}"
+    return deployments
+
+
+ALL_DEPLOYMENTS_LIST = _compute_deployments(ALL_DATES)
+
+_date_to_deployment = {}
+for _dep in ALL_DEPLOYMENTS_LIST:
+    _d = _dep["start_date"]
+    while _d <= _dep["end_date"]:
+        _date_to_deployment[_d] = _dep["label"]
+        _d += timedelta(days=1)
+
+DF_ALL["deployment"] = DF_ALL["msg_date"].dt.date.map(_date_to_deployment)
+ALL_DEPLOYMENTS = [dep["label"] for dep in ALL_DEPLOYMENTS_LIST]
+
 # Stats
 TOTAL_MSGS = len(DF_ALL)
 CLEAN_MSGS = len(DF_ALL[DF_ALL["noise_type"] == "clean"])
@@ -380,7 +432,8 @@ NUM_SENDERS = len(ALL_SENDERS_RESOLVED)
 # ── Helper: filtered DataFrame ───────────────────────────────────────────────
 
 def get_filtered_df(chats, senders, noise_types, msg_types,
-                    time_range, use_resolved, date_start=None, date_end=None):
+                    time_range, use_resolved, date_start=None, date_end=None,
+                    deployments=None):
     """Apply all sidebar filters to DF_ALL and return filtered copy."""
     df = DF_ALL.copy()
 
@@ -389,6 +442,10 @@ def get_filtered_df(chats, senders, noise_types, msg_types,
         df = df[df["msg_date"] >= pd.Timestamp(date_start)]
     if date_end:
         df = df[df["msg_date"] <= pd.Timestamp(date_end)]
+
+    # Deployment filter
+    if deployments:
+        df = df[df["deployment"].isin(deployments)]
 
     # Chat filter
     if chats:
@@ -510,6 +567,17 @@ sidebar = dbc.Card(
                     style={"fontSize": "12px"},
                 ),
 
+                # Deployment filter
+                html.Label("Deployment", className="fw-bold mb-1"),
+                dcc.Dropdown(
+                    id="filter-deployment",
+                    options=[{"label": d, "value": d} for d in ALL_DEPLOYMENTS],
+                    value=ALL_DEPLOYMENTS,
+                    multi=True,
+                    placeholder="Select deployments...",
+                    className="mb-3",
+                ),
+
                 html.Hr(),
 
                 # Summary stats card
@@ -582,6 +650,18 @@ main_content = dbc.Tabs(
                 dbc.Col(dcc.Graph(id="chart-daily-count-trend"), md=6),
             ]),
         ]),
+        dbc.Tab(label="Deployments", tab_id="tab-deployments", children=[
+            dbc.Row([
+                dbc.Col(html.Div(id="deployment-summary-container"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-deployment-timeline"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-deployment-crew-comparison"), md=6),
+                dbc.Col(dcc.Graph(id="chart-deployment-sites-heatmap"), md=6),
+            ]),
+        ]),
         dbc.Tab(label="Crew Metrics", tab_id="tab-crew", children=[
             dbc.Row([
                 dbc.Col(html.Div(id="crew-scorecard-container"), md=12),
@@ -630,6 +710,7 @@ FILTER_INPUTS = [
     Input("filter-resolved", "value"),
     Input("filter-dates", "start_date"),
     Input("filter-dates", "end_date"),
+    Input("filter-deployment", "value"),
 ]
 
 
@@ -644,11 +725,11 @@ def _apply_quality_filter(quality):
 
 
 def _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-            date_start=None, date_end=None):
+            date_start=None, date_end=None, deployments=None):
     """Convenience wrapper that translates quality radio to noise_types."""
     noise_types = _apply_quality_filter(quality)
     return get_filtered_df(chats, senders, noise_types, msg_types,
-                           time_range, use_resolved, date_start, date_end)
+                           time_range, use_resolved, date_start, date_end, deployments)
 
 
 def _sender_col(use_resolved):
@@ -662,9 +743,9 @@ def _sender_col(use_resolved):
     FILTER_INPUTS,
 )
 def update_summary(chats, senders, quality, msg_types, time_range,
-                   use_resolved, date_start, date_end):
+                   use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     n_clean = len(df[df["noise_type"] == "clean"])
     n_noise = len(df[df["noise_type"] != "clean"])
@@ -717,9 +798,9 @@ def update_summary(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-msgs-per-chat", "figure"), FILTER_INPUTS)
 def chart_msgs_per_chat(chats, senders, quality, msg_types, time_range,
-                        use_resolved, date_start, date_end):
+                        use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[df[scol] != ""]
     if df_valid.empty:
@@ -759,9 +840,9 @@ def chart_msgs_per_chat(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-type-donut", "figure"), FILTER_INPUTS)
 def chart_type_donut(chats, senders, quality, msg_types, time_range,
-                     use_resolved, date_start, date_end):
+                     use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     if df.empty:
         return _empty_fig("Message Type Distribution")
 
@@ -783,9 +864,9 @@ def chart_type_donut(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-heatmap", "figure"), FILTER_INPUTS)
 def chart_heatmap(chats, senders, quality, msg_types, time_range,
-                  use_resolved, date_start, date_end):
+                  use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[(df[scol] != "") & df["hour_int"].notna()]
     if df_valid.empty:
@@ -824,9 +905,9 @@ def chart_heatmap(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-sender-chat", "figure"), FILTER_INPUTS)
 def chart_sender_chat(chats, senders, quality, msg_types, time_range,
-                      use_resolved, date_start, date_end):
+                      use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[df[scol] != ""]
     if df_valid.empty:
@@ -855,9 +936,9 @@ def chart_sender_chat(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-timeline", "figure"), FILTER_INPUTS)
 def chart_timeline(chats, senders, quality, msg_types, time_range,
-                   use_resolved, date_start, date_end):
+                   use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[(df[scol] != "") & df["time"].notna()].copy()
     if df_valid.empty:
@@ -883,9 +964,9 @@ def chart_timeline(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-kde", "figure"), FILTER_INPUTS)
 def chart_kde(chats, senders, quality, msg_types, time_range, use_resolved,
-              date_start, date_end):
+              date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[(df[scol] != "") & df["hour"].notna()]
     if df_valid.empty:
@@ -933,9 +1014,9 @@ def chart_kde(chats, senders, quality, msg_types, time_range, use_resolved,
 
 @app.callback(Output("chart-line-hourly", "figure"), FILTER_INPUTS)
 def chart_line_hourly(chats, senders, quality, msg_types, time_range,
-                      use_resolved, date_start, date_end):
+                      use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[(df[scol] != "") & df["hour_int"].notna()].copy()
     if df_valid.empty:
@@ -979,9 +1060,9 @@ def chart_line_hourly(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-scatter-len-hour", "figure"), FILTER_INPUTS)
 def chart_scatter_len_hour(chats, senders, quality, msg_types, time_range,
-                           use_resolved, date_start, date_end):
+                           use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[(df[scol] != "") & df["hour"].notna() &
                   (df["content_len"] > 0)].copy()
@@ -1012,9 +1093,9 @@ def chart_scatter_len_hour(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-msgs-per-sender", "figure"), FILTER_INPUTS)
 def chart_msgs_per_sender(chats, senders, quality, msg_types, time_range,
-                          use_resolved, date_start, date_end):
+                          use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[df[scol] != ""]
     if df_valid.empty:
@@ -1056,9 +1137,9 @@ def chart_msgs_per_sender(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-gap-box", "figure"), FILTER_INPUTS)
 def chart_gap_box(chats, senders, quality, msg_types, time_range,
-                  use_resolved, date_start, date_end):
+                  use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[(df[scol] != "") & df["time"].notna()].copy()
     if df_valid.empty:
@@ -1105,9 +1186,9 @@ def chart_gap_box(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-content-len", "figure"), FILTER_INPUTS)
 def chart_content_len(chats, senders, quality, msg_types, time_range,
-                      use_resolved, date_start, date_end):
+                      use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     df_valid = df[df[scol] != ""].copy()
     if df_valid.empty:
@@ -1180,9 +1261,9 @@ def chart_quality(chats, date_start, date_end):
 
 @app.callback(Output("data-table-container", "children"), FILTER_INPUTS)
 def update_data_table(chats, senders, quality, msg_types, time_range,
-                      use_resolved, date_start, date_end):
+                      use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
 
     # Select columns for display
@@ -1462,9 +1543,9 @@ def _build_crew_scorecard(visits_df, ds_df):
 
 @app.callback(Output("efficiency-report-card", "children"), FILTER_INPUTS)
 def efficiency_report_card(chats, senders, quality, msg_types, time_range,
-                           use_resolved, date_start, date_end):
+                           use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     ds = _build_daily_summary(df, scol)
     if ds.empty:
@@ -1510,9 +1591,9 @@ def efficiency_report_card(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-first-report", "figure"), FILTER_INPUTS)
 def chart_first_report(chats, senders, quality, msg_types, time_range,
-                       use_resolved, date_start, date_end):
+                       use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     ds = _build_daily_summary(df, scol)
     if ds.empty:
@@ -1547,9 +1628,9 @@ def chart_first_report(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-report-window-box", "figure"), FILTER_INPUTS)
 def chart_report_window_box(chats, senders, quality, msg_types, time_range,
-                            use_resolved, date_start, date_end):
+                            use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     ds = _build_daily_summary(df, scol)
     if ds.empty:
@@ -1574,9 +1655,9 @@ def chart_report_window_box(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-daily-count-trend", "figure"), FILTER_INPUTS)
 def chart_daily_count_trend(chats, senders, quality, msg_types, time_range,
-                            use_resolved, date_start, date_end):
+                            use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
+                 date_start, date_end, deployments)
     scol = _sender_col(use_resolved)
     ds = _build_daily_summary(df, scol)
     if ds.empty:
@@ -1601,22 +1682,21 @@ def chart_daily_count_trend(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("crew-scorecard-container", "children"), FILTER_INPUTS)
 def crew_scorecard(chats, senders, quality, msg_types, time_range,
-                   use_resolved, date_start, date_end):
+                   use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
-    scol = _sender_col(use_resolved)
-    visits_df = _build_site_visits(df, scol)
+                 date_start, date_end, deployments)
+    visits_df = _build_site_visits(df, "chat")
     if visits_df.empty:
         return html.P("No site visit data for current filters",
                        className="text-muted p-3")
 
-    ds = _build_daily_summary(df, scol)
+    ds = _build_daily_summary(df, "chat")
     sc = _build_crew_scorecard(visits_df, ds)
     if sc.empty:
         return html.P("No crew scorecard data", className="text-muted p-3")
 
     sc_display = sc.rename(columns={
-        "sender": "Sender",
+        "sender": "Crew",
         "days_active": "Days Active",
         "total_sites": "Total Sites",
         "avg_sites_per_day": "Sites/Day",
@@ -1652,15 +1732,14 @@ def crew_scorecard(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-sites-per-hour", "figure"), FILTER_INPUTS)
 def chart_sites_per_hour(chats, senders, quality, msg_types, time_range,
-                         use_resolved, date_start, date_end):
+                         use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
-    scol = _sender_col(use_resolved)
-    visits_df = _build_site_visits(df, scol)
+                 date_start, date_end, deployments)
+    visits_df = _build_site_visits(df, "chat")
     if visits_df.empty:
         return _empty_fig("Sites per Hour")
 
-    ds = _build_daily_summary(df, scol)
+    ds = _build_daily_summary(df, "chat")
     sc = _build_crew_scorecard(visits_df, ds)
     if sc.empty:
         return _empty_fig("Sites per Hour")
@@ -1669,8 +1748,8 @@ def chart_sites_per_hour(chats, senders, quality, msg_types, time_range,
     fig = px.bar(
         sc_sorted, y="sender", x="avg_sites_per_hour", orientation="h",
         text="avg_sites_per_hour",
-        title="Average Sites per Hour by Crew Member",
-        labels={"avg_sites_per_hour": "Sites / Hour", "sender": "Sender"},
+        title="Average Sites per Hour by Crew",
+        labels={"avg_sites_per_hour": "Sites / Hour", "sender": "Crew"},
         color="avg_sites_per_hour",
         color_continuous_scale="RdYlGn",
     )
@@ -1688,11 +1767,10 @@ def chart_sites_per_hour(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-transition-time", "figure"), FILTER_INPUTS)
 def chart_transition_time(chats, senders, quality, msg_types, time_range,
-                          use_resolved, date_start, date_end):
+                          use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
-    scol = _sender_col(use_resolved)
-    visits_df = _build_site_visits(df, scol)
+                 date_start, date_end, deployments)
+    visits_df = _build_site_visits(df, "chat")
     if visits_df.empty:
         return _empty_fig("Transition Time Between Sites")
 
@@ -1703,7 +1781,7 @@ def chart_transition_time(chats, senders, quality, msg_types, time_range,
     fig = px.box(
         trans_df, x="sender", y="transition_min", points="all",
         title="Transition Time Between Sites (minutes)",
-        labels={"transition_min": "Transition (min)", "sender": "Sender"},
+        labels={"transition_min": "Transition (min)", "sender": "Crew"},
         color="sender",
     )
     # Add mean annotations
@@ -1729,11 +1807,10 @@ def chart_transition_time(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-route-timeline", "figure"), FILTER_INPUTS)
 def chart_route_timeline(chats, senders, quality, msg_types, time_range,
-                         use_resolved, date_start, date_end):
+                         use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
-    scol = _sender_col(use_resolved)
-    visits_df = _build_site_visits(df, scol)
+                 date_start, date_end, deployments)
+    visits_df = _build_site_visits(df, "chat")
     if visits_df.empty:
         return _empty_fig("Route Timeline")
 
@@ -1756,7 +1833,7 @@ def chart_route_timeline(chats, senders, quality, msg_types, time_range,
         color="location",
         hover_data=["location", "msg_count", "duration_min"],
         title="Route Timeline (site visits over time)",
-        labels={"sender": "Crew Member"},
+        labels={"sender": "Crew"},
     )
     fig.update_layout(
         margin=dict(l=10, r=10, t=40, b=10),
@@ -1772,11 +1849,10 @@ def chart_route_timeline(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-pace-consistency", "figure"), FILTER_INPUTS)
 def chart_pace_consistency(chats, senders, quality, msg_types, time_range,
-                           use_resolved, date_start, date_end):
+                           use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
-    scol = _sender_col(use_resolved)
-    visits_df = _build_site_visits(df, scol)
+                 date_start, date_end, deployments)
+    visits_df = _build_site_visits(df, "chat")
     if visits_df.empty:
         return _empty_fig("Pace Consistency")
 
@@ -1828,17 +1904,16 @@ def chart_pace_consistency(chats, senders, quality, msg_types, time_range,
 
 @app.callback(Output("chart-top-locations", "figure"), FILTER_INPUTS)
 def chart_top_locations(chats, senders, quality, msg_types, time_range,
-                        use_resolved, date_start, date_end):
+                        use_resolved, date_start, date_end, deployments):
     df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end)
-    scol = _sender_col(use_resolved)
-    visits_df = _build_site_visits(df, scol)
+                 date_start, date_end, deployments)
+    visits_df = _build_site_visits(df, "chat")
     if visits_df.empty:
         return _empty_fig("Most Visited Locations")
 
     loc_counts = (visits_df.groupby("location")
                   .agg(visits=("sender", "size"),
-                       senders=("sender", "nunique"))
+                       crews=("sender", "nunique"))
                   .sort_values("visits", ascending=False)
                   .head(20)
                   .reset_index())
@@ -1848,16 +1923,217 @@ def chart_top_locations(chats, senders, quality, msg_types, time_range,
         text="visits",
         title="Top 20 Most Visited Locations",
         labels={"visits": "Visit Count", "location": "Location"},
-        color="senders",
+        color="crews",
         color_continuous_scale="Blues",
-        hover_data=["senders"],
+        hover_data=["crews"],
     )
     fig.update_traces(textposition="outside", textfont_size=10)
     fig.update_layout(
         yaxis={"categoryorder": "total ascending"},
         margin=dict(l=10, r=60, t=40, b=10),
         height=max(400, len(loc_counts) * 25),
-        coloraxis_colorbar_title="Unique<br>Senders",
+        coloraxis_colorbar_title="Unique<br>Crews",
+    )
+    return fig
+
+
+# ── Deployment Callback 1: Deployment Summary Table ──────────────────────────
+
+@app.callback(Output("deployment-summary-container", "children"), FILTER_INPUTS)
+def deployment_summary_table(chats, senders, quality, msg_types, time_range,
+                             use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    if df.empty or df["deployment"].isna().all():
+        return html.P("No deployment data for current filters",
+                       className="text-muted p-3")
+
+    rows = []
+    for dep_label, grp in df.groupby("deployment"):
+        dep_info = next(
+            (d for d in ALL_DEPLOYMENTS_LIST if d["label"] == dep_label), None)
+        days = dep_info["days"] if dep_info else 0
+        crews = grp["chat"].nunique()
+        n_msgs = len(grp)
+        visits_df = _build_site_visits(grp, "chat")
+        total_sites = len(visits_df)
+        ds = _build_daily_summary(grp, "chat")
+        sc = _build_crew_scorecard(visits_df, ds)
+        avg_sites_hr = sc["avg_sites_per_hour"].mean() if not sc.empty else 0
+
+        rows.append({
+            "Deployment": dep_label,
+            "Days": days,
+            "Crews Active": crews,
+            "Total Messages": n_msgs,
+            "Total Sites": total_sites,
+            "Avg Sites/Hr": round(avg_sites_hr, 1),
+        })
+
+    dep_df = pd.DataFrame(rows)
+    table = dash_table.DataTable(
+        data=dep_df.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in dep_df.columns],
+        sort_action="native",
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+        style_header={
+            "backgroundColor": "#2c3e50", "color": "white", "fontWeight": "bold",
+        },
+    )
+    return html.Div([html.H5("Deployment Summary", className="mb-2"), table])
+
+
+# ── Deployment Callback 2: Deployment Timeline ──────────────────────────────
+
+@app.callback(Output("chart-deployment-timeline", "figure"), FILTER_INPUTS)
+def chart_deployment_timeline(chats, senders, quality, msg_types, time_range,
+                              use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    if df.empty or df["deployment"].isna().all():
+        return _empty_fig("Deployment Timeline")
+
+    dep_stats = []
+    for dep_info in ALL_DEPLOYMENTS_LIST:
+        dep_label = dep_info["label"]
+        grp = df[df["deployment"] == dep_label]
+        if grp.empty:
+            continue
+        dep_stats.append({
+            "Deployment": dep_label,
+            "Start": pd.Timestamp(dep_info["start_date"]),
+            "End": pd.Timestamp(dep_info["end_date"]) + pd.Timedelta(days=1),
+            "Messages": len(grp),
+            "Crews": grp["chat"].nunique(),
+        })
+
+    if not dep_stats:
+        return _empty_fig("Deployment Timeline")
+
+    dep_df = pd.DataFrame(dep_stats)
+    fig = px.timeline(
+        dep_df,
+        x_start="Start",
+        x_end="End",
+        y="Deployment",
+        color="Messages",
+        hover_data=["Messages", "Crews"],
+        title="Deployment Timeline",
+        color_continuous_scale="Blues",
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=300,
+        yaxis={"categoryorder": "array",
+               "categoryarray": [d["label"] for d in ALL_DEPLOYMENTS_LIST][::-1]},
+    )
+    return fig
+
+
+# ── Deployment Callback 3: Cross-Deployment Crew Comparison ─────────────────
+
+@app.callback(Output("chart-deployment-crew-comparison", "figure"), FILTER_INPUTS)
+def chart_deployment_crew_comparison(chats, senders, quality, msg_types,
+                                     time_range, use_resolved, date_start,
+                                     date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    if df.empty or df["deployment"].isna().all():
+        return _empty_fig("Cross-Deployment Crew Comparison")
+
+    rows = []
+    for dep_label, grp in df.groupby("deployment"):
+        visits_df = _build_site_visits(grp, "chat")
+        if visits_df.empty:
+            continue
+        for crew, crew_visits in visits_df.groupby("sender"):
+            rows.append({
+                "Crew": crew,
+                "Deployment": dep_label,
+                "Sites": len(crew_visits),
+            })
+
+    if not rows:
+        return _empty_fig("Cross-Deployment Crew Comparison")
+
+    comp_df = pd.DataFrame(rows)
+    fig = px.bar(
+        comp_df, x="Crew", y="Sites", color="Deployment",
+        barmode="group",
+        title="Cross-Deployment Crew Comparison (Sites Visited)",
+        labels={"Sites": "Sites Visited", "Crew": "Crew"},
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        xaxis_tickangle=-30,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Deployment Callback 4: Deployment Sites Heatmap ─────────────────────────
+
+@app.callback(Output("chart-deployment-sites-heatmap", "figure"), FILTER_INPUTS)
+def chart_deployment_sites_heatmap(chats, senders, quality, msg_types,
+                                   time_range, use_resolved, date_start,
+                                   date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    if df.empty or df["deployment"].isna().all():
+        return _empty_fig("Deployment \u00d7 Sites Heatmap")
+
+    visits_df = _build_site_visits(df, "chat")
+    if visits_df.empty:
+        return _empty_fig("Deployment \u00d7 Sites Heatmap")
+
+    # Map visit dates to deployment labels
+    visits_df = visits_df.copy()
+    visits_df["deployment"] = visits_df["date"].apply(
+        lambda d: _date_to_deployment.get(
+            d.date() if hasattr(d, "date") else d, ""))
+    visits_df = visits_df[visits_df["deployment"] != ""]
+
+    # Count visits per (deployment, location)
+    heat = (visits_df.groupby(["deployment", "location"])
+            .size().reset_index(name="visits"))
+
+    # Top 20 locations by total visits
+    top_locs = (heat.groupby("location")["visits"].sum()
+                .sort_values(ascending=False).head(20).index.tolist())
+    heat = heat[heat["location"].isin(top_locs)]
+
+    if heat.empty:
+        return _empty_fig("Deployment \u00d7 Sites Heatmap")
+
+    # Pivot for heatmap
+    pivot = heat.pivot_table(index="deployment", columns="location",
+                             values="visits", fill_value=0)
+    dep_order = [d["label"] for d in ALL_DEPLOYMENTS_LIST
+                 if d["label"] in pivot.index]
+    pivot = pivot.reindex(dep_order)
+    col_order = [c for c in top_locs if c in pivot.columns]
+    pivot = pivot[col_order]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot.values,
+        x=[loc[:30] for loc in pivot.columns],
+        y=pivot.index.tolist(),
+        colorscale="YlOrRd",
+        text=pivot.values,
+        texttemplate="%{text}",
+        hovertemplate=(
+            "Deployment: %{y}<br>Location: %{x}<br>"
+            "Visits: %{z}<extra></extra>"),
+    ))
+    fig.update_layout(
+        title="Deployment \u00d7 Sites Heatmap (top 20 locations)",
+        xaxis_title="Location",
+        yaxis_title="Deployment",
+        margin=dict(l=10, r=10, t=40, b=80),
+        height=400,
+        xaxis_tickangle=-45,
     )
     return fig
 
@@ -1897,6 +2173,26 @@ def print_report():
     print(f"  Unique chats:    {NUM_CHATS}")
     print(f"  Unique senders:  {NUM_SENDERS}")
     print(f"  Message types:   {', '.join(ALL_TYPES)}")
+
+    # ── Deployment summary
+    print(f"\n{sep}")
+    print("  Deployment Summary")
+    print(sep)
+    if ALL_DEPLOYMENTS_LIST:
+        print(f"  {'#':>2s}  {'Date Range':<20s} {'Days':>4s} {'Crews':>5s} "
+              f"{'Sites':>5s} {'Msgs':>5s}")
+        print(f"  {'─' * 2}  {'─' * 20} {'─' * 4} {'─' * 5} {'─' * 5} {'─' * 5}")
+        for dep in ALL_DEPLOYMENTS_LIST:
+            grp = DF_ALL[DF_ALL["deployment"] == dep["label"]]
+            grp_clean = grp[grp["noise_type"] == "clean"]
+            n_crews = grp_clean["chat"].nunique()
+            n_msgs = len(grp_clean)
+            visits_df = _build_site_visits(grp_clean, "chat")
+            n_sites = len(visits_df)
+            print(f"  {dep['id']:>2d}  {dep['label']:<20s} {dep['days']:>4d} "
+                  f"{n_crews:>5d} {n_sites:>5d} {n_msgs:>5d}")
+    else:
+        print("  No deployments detected.")
 
     # ── Noise breakdown
     print(f"\n{sep}")
@@ -2023,21 +2319,21 @@ def print_report():
 
     # ── Crew Metrics
     print(f"\n{sep}")
-    print("  Crew Metrics (site visits per sender)")
+    print("  Crew Metrics (site visits per crew/chat)")
     print(sep)
     df_clean = DF_ALL[DF_ALL["noise_type"] == "clean"]
-    visits_df = _build_site_visits(df_clean, "sender_resolved")
+    visits_df = _build_site_visits(df_clean, "chat")
     if not visits_df.empty:
-        ds_crew = _build_daily_summary(df_clean, "sender_resolved")
+        ds_crew = _build_daily_summary(df_clean, "chat")
         sc = _build_crew_scorecard(visits_df, ds_crew)
         if not sc.empty:
-            print(f"  {'Sender':<25s} {'Sites':>5s} {'Sites/Day':>9s} "
+            print(f"  {'Crew':<35s} {'Sites':>5s} {'Sites/Day':>9s} "
                   f"{'Sites/Hr':>8s} {'Avg Trans':>9s} {'Hrs':>5s}")
-            print(f"  {'─' * 25} {'─' * 5} {'─' * 9} {'─' * 8} "
+            print(f"  {'─' * 35} {'─' * 5} {'─' * 9} {'─' * 8} "
                   f"{'─' * 9} {'─' * 5}")
             for _, row in sc.iterrows():
-                s = str(row["sender"])[:25]
-                print(f"  {s:<25s} {int(row['total_sites']):>5d} "
+                s = str(row["sender"])[:35]
+                print(f"  {s:<35s} {int(row['total_sites']):>5d} "
                       f"{row['avg_sites_per_day']:>9.1f} "
                       f"{row['avg_sites_per_hour']:>8.1f} "
                       f"{row['avg_transition_min']:>8.1f}m "
