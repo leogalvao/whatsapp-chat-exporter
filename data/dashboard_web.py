@@ -513,10 +513,22 @@ server.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 
 @server.route("/api/export-report", methods=["GET"])
 def api_export_report():
+    try:
+        return _do_export_report()
+    except Exception as e:
+        print(f"[export] Error: {e}")
+        return flask_jsonify({"error": str(e)}), 500
+
+
+def _do_export_report():
     fmt = flask_request.args.get("format", "json")
     df = DF_ALL.copy()
     if df.empty:
         return flask_jsonify({"error": "No data loaded"}), 400
+
+    non_trackable = set(SNOW_CONFIG.get("non_trackable_senders", []))
+    if non_trackable and "sender_resolved" in df.columns:
+        df = df[~df["sender_resolved"].isin(non_trackable)]
 
     scol = "sender_resolved"
     ds = _build_daily_summary(df, scol)
@@ -569,13 +581,15 @@ def api_export_report():
     productivity_scores = []
     if not prod_df.empty:
         for _, r in prod_df.iterrows():
+            d = r["date"]
+            date_str = str(d.date()) if hasattr(d, "date") and callable(d.date) else str(d)
             productivity_scores.append({
                 "crew": r["sender"],
-                "date": str(r["date"].date()) if hasattr(r["date"], "date") else str(r["date"]),
+                "date": date_str,
                 "productivity_score": float(r["productivity_score"]),
                 "pace_score": round(float(r["pace_score"]), 1),
                 "punctuality_score": round(float(r["punctuality_score"]), 1),
-                "coverage_score": round(float(r["coverage"]), 1),
+                "coverage_score": round(float(r.get("coverage", 0)), 1),
                 "sites_visited": int(r["sites_visited"]),
                 "sites_per_hour": round(float(r["sites_per_hour"]), 2),
             })
@@ -583,9 +597,11 @@ def api_export_report():
     site_details = []
     if not visits_df.empty:
         for _, r in visits_df.iterrows():
+            d = r["date"]
+            date_str = str(d.date()) if hasattr(d, "date") and callable(d.date) else str(d)
             site_details.append({
                 "crew": r["sender"],
-                "date": str(r["date"].date()) if hasattr(r["date"], "date") else str(r["date"]),
+                "date": date_str,
                 "location": r["location"],
                 "start_time": r["start_time"].strftime("%I:%M %p") if pd.notna(r["start_time"]) else "",
                 "end_time": r["end_time"].strftime("%I:%M %p") if pd.notna(r["end_time"]) else "",
@@ -596,9 +612,11 @@ def api_export_report():
     transitions = []
     if not trans_df.empty:
         for _, r in trans_df.iterrows():
+            d = r["date"]
+            date_str = str(d.date()) if hasattr(d, "date") and callable(d.date) else str(d)
             transitions.append({
                 "crew": r["sender"],
-                "date": str(r["date"].date()) if hasattr(r["date"], "date") else str(r["date"]),
+                "date": date_str,
                 "from": r["from_location"],
                 "to": r["to_location"],
                 "transition_min": round(r["transition_min"], 1),
@@ -675,6 +693,27 @@ def api_export_report():
             writer.writerow(["Section: Site Visits"])
             writer.writerow(site_details[0].keys())
             for row in site_details:
+                writer.writerow(row.values())
+            writer.writerow([])
+
+        if transitions:
+            writer.writerow(["Section: Transitions"])
+            writer.writerow(transitions[0].keys())
+            for row in transitions:
+                writer.writerow(row.values())
+            writer.writerow([])
+
+        if report.get("recalls"):
+            writer.writerow(["Section: Recalls"])
+            writer.writerow(report["recalls"][0].keys())
+            for row in report["recalls"]:
+                writer.writerow(row.values())
+            writer.writerow([])
+
+        if report.get("location_type_stats"):
+            writer.writerow(["Section: Location Type Stats"])
+            writer.writerow(report["location_type_stats"][0].keys())
+            for row in report["location_type_stats"]:
                 writer.writerow(row.values())
 
         resp = server.make_response(output.getvalue())
@@ -3339,7 +3378,7 @@ def _build_daily_productivity_score(df, scol):
 
     result = merged[["sender", "date", "sites_visited", "sites_per_hour",
                       "first_hour", "punctuality_score", "pace_score",
-                      "productivity_score"]].copy()
+                      "coverage", "productivity_score"]].copy()
     result["date"] = result["date"].dt.strftime("%Y-%m-%d")
     result["sites_per_hour"] = result["sites_per_hour"].round(1)
     result["first_hour"] = result["first_hour"].round(2)

@@ -52,6 +52,13 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Fixed CSV and JSON export endpoints
+  - Fixed KeyError on 'coverage' column missing from productivity score DataFrame
+  - Added coverage column to _build_daily_productivity_score output
+  - Fixed unsafe date.date() calls on string values causing AttributeError
+  - Added non-trackable sender filtering to export data (matches dashboard filtering)
+  - Added missing CSV sections: Transitions, Recalls, Location Type Stats
+  - Wrapped export endpoint in try/except for graceful error handling
 - 2026-02-23: Non-trackable sender filtering applied globally
   - Non-trackable senders now excluded from ALL metrics (KPIs, Overview, Productivity, Crew Analysis, Deployments, Operations)
   - Filtering applied centrally in get_filtered_df so all callbacks automatically exclude non-trackable senders
