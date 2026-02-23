@@ -658,6 +658,9 @@ main_content = dbc.Tabs(
                 dbc.Col(dcc.Graph(id="chart-deployment-timeline"), md=12),
             ]),
             dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-deployment-crew-trend"), md=12),
+            ]),
+            dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-deployment-crew-comparison"), md=6),
                 dbc.Col(dcc.Graph(id="chart-deployment-sites-heatmap"), md=6),
             ]),
@@ -2017,14 +2020,25 @@ def chart_deployment_timeline(chats, senders, quality, msg_types, time_range,
         x_start="Start",
         x_end="End",
         y="Deployment",
-        color="Messages",
+        color="Deployment",
         hover_data=["Messages", "Crews"],
         title="Deployment Timeline",
-        color_continuous_scale="Blues",
+        color_discrete_sequence=px.colors.qualitative.T10,
     )
+    # Add message count as text on each bar
+    for i, row in dep_df.iterrows():
+        fig.add_annotation(
+            x=row["Start"] + (row["End"] - row["Start"]) / 2,
+            y=row["Deployment"],
+            text=f"{row['Messages']} msgs / {row['Crews']} crews",
+            showarrow=False,
+            font=dict(size=11, color="white"),
+        )
     fig.update_layout(
+        template="plotly_white",
         margin=dict(l=10, r=10, t=40, b=10),
         height=300,
+        showlegend=False,
         yaxis={"categoryorder": "array",
                "categoryarray": [d["label"] for d in ALL_DEPLOYMENTS_LIST][::-1]},
     )
@@ -2063,8 +2077,10 @@ def chart_deployment_crew_comparison(chats, senders, quality, msg_types,
         barmode="group",
         title="Cross-Deployment Crew Comparison (Sites Visited)",
         labels={"Sites": "Sites Visited", "Crew": "Crew"},
+        color_discrete_sequence=px.colors.qualitative.T10,
     )
     fig.update_layout(
+        template="plotly_white",
         margin=dict(l=10, r=10, t=40, b=10),
         height=400,
         xaxis_tickangle=-30,
@@ -2120,7 +2136,7 @@ def chart_deployment_sites_heatmap(chats, senders, quality, msg_types,
         z=pivot.values,
         x=[loc[:30] for loc in pivot.columns],
         y=pivot.index.tolist(),
-        colorscale="YlOrRd",
+        colorscale="Tealgrn",
         text=pivot.values,
         texttemplate="%{text}",
         hovertemplate=(
@@ -2128,12 +2144,107 @@ def chart_deployment_sites_heatmap(chats, senders, quality, msg_types,
             "Visits: %{z}<extra></extra>"),
     ))
     fig.update_layout(
+        template="plotly_white",
         title="Deployment \u00d7 Sites Heatmap (top 20 locations)",
         xaxis_title="Location",
         yaxis_title="Deployment",
         margin=dict(l=10, r=10, t=40, b=80),
         height=400,
         xaxis_tickangle=-45,
+    )
+    return fig
+
+
+# ── Deployment Callback 5: Crew Performance Trend Across Deployments ─────────
+
+@app.callback(Output("chart-deployment-crew-trend", "figure"), FILTER_INPUTS)
+def chart_deployment_crew_trend(chats, senders, quality, msg_types, time_range,
+                                use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    if df.empty or df["deployment"].isna().all():
+        return _empty_fig("Crew Performance Trend Across Deployments")
+
+    # Order deployments chronologically
+    dep_order = [d["label"] for d in ALL_DEPLOYMENTS_LIST]
+
+    rows = []
+    for dep_label, grp in df.groupby("deployment"):
+        visits_df = _build_site_visits(grp, "chat")
+        if visits_df.empty:
+            continue
+        ds = _build_daily_summary(grp, "chat")
+        sc = _build_crew_scorecard(visits_df, ds)
+        if sc.empty:
+            continue
+        for _, crew_row in sc.iterrows():
+            rows.append({
+                "Crew": crew_row["sender"],
+                "Deployment": dep_label,
+                "Sites/Hr": crew_row["avg_sites_per_hour"],
+                "Total Sites": crew_row["total_sites"],
+                "Active Hrs": crew_row["total_active_hrs"],
+            })
+
+    if not rows:
+        return _empty_fig("Crew Performance Trend Across Deployments")
+
+    trend_df = pd.DataFrame(rows)
+
+    # Compute overall average per deployment for the reference line
+    dep_avg = (trend_df.groupby("Deployment")["Sites/Hr"]
+               .mean().reset_index(name="Avg Sites/Hr"))
+
+    # Sort by deployment order
+    trend_df["dep_idx"] = trend_df["Deployment"].map(
+        {label: i for i, label in enumerate(dep_order)})
+    trend_df = trend_df.sort_values("dep_idx")
+    dep_avg["dep_idx"] = dep_avg["Deployment"].map(
+        {label: i for i, label in enumerate(dep_order)})
+    dep_avg = dep_avg.sort_values("dep_idx")
+
+    fig = go.Figure()
+    tableau = px.colors.qualitative.T10
+    crews = sorted(trend_df["Crew"].unique())
+
+    for i, crew in enumerate(crews):
+        crew_data = trend_df[trend_df["Crew"] == crew]
+        color = tableau[i % len(tableau)]
+        fig.add_trace(go.Scatter(
+            x=crew_data["Deployment"],
+            y=crew_data["Sites/Hr"],
+            mode="lines+markers",
+            name=crew,
+            line=dict(color=color, width=2),
+            marker=dict(size=8, symbol="circle"),
+            hovertemplate=(
+                "<b>%{fullData.name}</b><br>"
+                "Deployment: %{x}<br>"
+                "Sites/Hr: %{y:.1f}<br>"
+                "<extra></extra>"),
+        ))
+
+    # Add deployment average as dashed line
+    fig.add_trace(go.Scatter(
+        x=dep_avg["Deployment"],
+        y=dep_avg["Avg Sites/Hr"],
+        mode="lines+markers",
+        name="Deployment Avg",
+        line=dict(color="#2c3e50", width=3, dash="dash"),
+        marker=dict(size=10, symbol="diamond", color="#2c3e50"),
+    ))
+
+    fig.update_layout(
+        template="plotly_white",
+        title="Crew Performance Trend Across Deployments (Avg Sites/Hr)",
+        xaxis_title="Deployment",
+        yaxis_title="Sites per Hour",
+        xaxis={"categoryorder": "array", "categoryarray": dep_order},
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=450,
+        legend=dict(font=dict(size=10), orientation="h",
+                    yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
+        hovermode="x unified",
     )
     return fig
 
