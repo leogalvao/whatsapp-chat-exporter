@@ -489,6 +489,7 @@ app = Dash(
 )
 app.title = "WhatsApp Chat Dashboard"
 server = app.server
+server.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 
 
 @server.route("/api/upload-folder", methods=["POST"])
@@ -496,8 +497,10 @@ def api_upload_folder():
     archive_dir = os.path.join(DATA_DIR, "archive")
     os.makedirs(archive_dir, exist_ok=True)
     saved = []
+    skipped = []
     errors = []
     files = flask_request.files.getlist("files")
+    best_by_chat = {}
     for f in files:
         try:
             raw = f.read()
@@ -505,19 +508,47 @@ def api_upload_folder():
             if "exportInfo" not in data or "messages" not in data:
                 errors.append(f.filename)
                 continue
+            chat_name = data.get("exportInfo", {}).get("chatName", "").strip().lower()
+            msg_count = len(data.get("messages", []))
             safe_name = os.path.basename(f.filename)
             safe_name = re.sub(r"[^\w.\-]", "_", safe_name)
             if not safe_name.endswith(".json"):
                 safe_name += ".json"
+            if chat_name and chat_name in best_by_chat:
+                prev_count, prev_name, _ = best_by_chat[chat_name]
+                if msg_count > prev_count:
+                    skipped.append(prev_name)
+                    best_by_chat[chat_name] = (msg_count, safe_name, data)
+                else:
+                    skipped.append(safe_name)
+                    continue
+            else:
+                key = chat_name if chat_name else safe_name
+                best_by_chat[key] = (msg_count, safe_name, data)
+        except Exception as e:
+            errors.append(str(f.filename))
+    for _, (_, safe_name, data) in best_by_chat.items():
+        try:
             save_path = os.path.join(archive_dir, safe_name)
+            existing_count = 0
+            if os.path.exists(save_path):
+                try:
+                    with open(save_path, "r", encoding="utf-8") as ef:
+                        existing = json.load(ef)
+                    existing_count = len(existing.get("messages", []))
+                except Exception:
+                    pass
+                if len(data.get("messages", [])) <= existing_count:
+                    skipped.append(safe_name)
+                    continue
             with open(save_path, "w", encoding="utf-8") as out:
                 json.dump(data, out, ensure_ascii=False)
             saved.append(safe_name)
         except Exception as e:
-            errors.append(str(f.filename))
+            errors.append(safe_name)
     if saved:
         _reload_global_data()
-    return flask_jsonify({"saved": saved, "errors": errors})
+    return flask_jsonify({"saved": saved, "skipped": len(skipped), "errors": errors})
 
 
 # ── Main content (tabs) ─────────────────────────────────────────────────────
@@ -759,9 +790,16 @@ _FOLDER_UPLOAD_JS = """
                 if (data.saved && data.saved.length > 0) {
                     totalUploaded += data.saved.length;
                     folderCount++;
-                    btn.innerHTML = totalUploaded + ' file(s) from ' + folderCount + ' folder(s) uploaded<br>Click to add another folder';
+                    var msg = totalUploaded + ' file(s) from ' + folderCount + ' folder(s) uploaded';
+                    if (data.skipped && data.skipped > 0) msg += ' (' + data.skipped + ' duplicates skipped)';
+                    msg += '<br>Click to add another folder';
+                    btn.innerHTML = msg;
                     btn.style.color = '#198754';
                     doneBtn.style.display = 'inline';
+                } else if (data.skipped && data.skipped > 0) {
+                    btn.innerHTML = data.skipped + ' duplicate(s) skipped — no new files<br>Click to add another folder';
+                    btn.style.color = '#6c757d';
+                    if (totalUploaded > 0) doneBtn.style.display = 'inline';
                 } else {
                     btn.textContent = 'No valid exports found — click to try again';
                     btn.style.color = '#dc3545';
