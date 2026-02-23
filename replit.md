@@ -54,10 +54,11 @@ JSON chat exports are gitignored. Place exported files in `data/archive/` or `da
 
 ## Recent Changes
 - 2026-02-23: Added Location Registry and Map tab
-  - Location CSV upload in Settings with fuzzy matching against chat data locations
-  - Expected CSV format: location_name, address, lat, lon, crew_override
+  - Location CSV upload in Settings (supports routes format: Building Name, Billing Street, Crew Sidewalk, Crew Parking Lot)
+  - Also supports legacy format: location_name, address, lat, lon
   - Fuzzy matching with exact/substring/abbreviation-based matching and confidence scores
-  - Editable DataTable for manual crew assignment overrides
+  - Auto-assign crews button: analyzes chat data to determine which crew services each location
+  - Separate Crew Sidewalk and Crew Parking Lot columns (both editable for manual overrides)
   - New Map tab with DC boundary from ArcGIS API (cached locally)
   - OpenStreetMap tiles, location dots color-coded by crew, marker size by visit frequency
   - DC boundary polygon from data/config/dc_boundary.json

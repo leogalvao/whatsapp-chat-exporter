@@ -211,6 +211,86 @@ def _fuzzy_match_location(name, known_locations):
     return ("", 0)
 
 
+def _extract_crew_from_chat(chat_name):
+    """Extract crew name and type (sidewalk/parking) from chat group name."""
+    name = chat_name.strip()
+    is_sidewalk = bool(re.search(r'sidewalk', name, re.IGNORECASE))
+    is_parking = bool(re.search(r'parking', name, re.IGNORECASE))
+    crew = re.sub(r'\s*(sidewalk|parking\s*lot|parking)s?\s*$', '', name, flags=re.IGNORECASE).strip()
+    crew = re.sub(r'\s*QAQC\s*$', '', crew, flags=re.IGNORECASE).strip()
+    return crew, is_sidewalk, is_parking
+
+
+def _build_location_crew_map(df):
+    """Build mapping: normalized_location -> {sidewalk_crews: set, parking_crews: set}."""
+    loc_crew = {}
+    if df.empty:
+        return loc_crew
+    loc_df = df[(df["location"].str.len() > 0) & (df["noise_type"] == "clean")]
+    for _, row in loc_df.iterrows():
+        loc = row["location"]
+        chat = row["chat"]
+        crew, is_sw, is_pl = _extract_crew_from_chat(chat)
+        if not crew:
+            continue
+        norm_loc = _normalize_location(loc)
+        if norm_loc not in loc_crew:
+            loc_crew[norm_loc] = {"sidewalk": set(), "parking": set()}
+        if is_sw:
+            loc_crew[norm_loc]["sidewalk"].add(crew)
+        elif is_pl:
+            loc_crew[norm_loc]["parking"].add(crew)
+    return loc_crew
+
+
+def _find_crews_for_location(search_terms, loc_crew_map):
+    """Try multiple search terms to find crew assignments from chat data."""
+    for term in search_terms:
+        if not term:
+            continue
+        norm = _normalize_location(term)
+        crews = loc_crew_map.get(norm)
+        if crews and (crews["sidewalk"] or crews["parking"]):
+            return crews
+        for nloc, c in loc_crew_map.items():
+            if norm in nloc or nloc in norm:
+                if c["sidewalk"] or c["parking"]:
+                    return c
+    return None
+
+
+def _auto_assign_crews(registry, df):
+    """Auto-assign crews to registry locations based on chat location reports."""
+    loc_crew_map = _build_location_crew_map(df)
+    if not loc_crew_map:
+        return registry, 0
+
+    assigned = 0
+    for entry in registry:
+        matched_raw = entry.get("_matched_raw", "")
+        if not matched_raw:
+            mcl = entry.get("matched_chat_location", "")
+            if mcl and "(" in mcl:
+                matched_raw = mcl.split("(")[0].strip()
+
+        search_terms = [matched_raw, entry.get("address", ""), entry.get("location_name", "")]
+        crews = _find_crews_for_location(search_terms, loc_crew_map)
+        if not crews:
+            continue
+
+        changed = False
+        if crews["sidewalk"] and not entry.get("crew_sidewalk", ""):
+            entry["crew_sidewalk"] = ", ".join(sorted(crews["sidewalk"]))
+            changed = True
+        if crews["parking"] and not entry.get("crew_parking_lot", ""):
+            entry["crew_parking_lot"] = ", ".join(sorted(crews["parking"]))
+            changed = True
+        if changed:
+            assigned += 1
+
+    return registry, assigned
+
+
 def extract_location(content):
     """Extract a location from message content, or return empty string.
 
@@ -1088,8 +1168,11 @@ main_content = dbc.Tabs(
                         ),
                         className="mt-3",
                     ),
+                    dbc.Button("Auto-Assign Crews", id="locations-auto-assign-btn", color="info",
+                               className="mt-2 me-2", n_clicks=0),
                     dbc.Button("Save Locations", id="locations-save-btn", color="success",
                                className="mt-2 me-2", n_clicks=0),
+                    html.Span(id="locations-auto-assign-status", className="ms-2 align-middle"),
                     html.Span(id="locations-save-status", className="ms-2 align-middle"),
                 ], md=12),
             ]),
@@ -4104,6 +4187,46 @@ def upload_locations_csv(contents, filename):
         return table_data, status
     except Exception as e:
         return no_update, html.Span(f"Error parsing CSV: {e}", style={"color": "red"})
+
+
+@app.callback(
+    [Output("locations-registry-table", "data", allow_duplicate=True),
+     Output("locations-auto-assign-status", "children")],
+    Input("locations-auto-assign-btn", "n_clicks"),
+    State("locations-registry-table", "data"),
+    prevent_initial_call=True,
+)
+def auto_assign_crews(n_clicks, table_data):
+    global SNOW_CONFIG
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        registry = SNOW_CONFIG.get("location_registry", [])
+        if not registry and table_data:
+            registry = []
+            for row in table_data:
+                entry = dict(row)
+                mcl = entry.get("matched_chat_location", "")
+                if mcl and "(" in mcl:
+                    entry["_matched_raw"] = mcl.split("(")[0].strip()
+                registry.append(entry)
+
+        if not registry:
+            return no_update, html.Span("No locations loaded. Upload a CSV first.",
+                                         style={"color": "orange"})
+
+        registry, assigned = _auto_assign_crews(registry, DF_ALL)
+        SNOW_CONFIG["location_registry"] = registry
+        updated_table = [
+            {k: r.get(k, "") for k in ["location_name", "address", "matched_chat_location", "crew_sidewalk", "crew_parking_lot"]}
+            for r in registry
+        ]
+        status = html.Span(
+            f"Auto-assigned crews to {assigned} locations. Review and edit as needed, then Save.",
+            style={"color": "green", "fontWeight": "bold"})
+        return updated_table, status
+    except Exception as e:
+        return no_update, html.Span(f"Error: {e}", style={"color": "red"})
 
 
 @app.callback(
