@@ -30,7 +30,7 @@ import dash_bootstrap_components as dbc
 from domain_model import (
     load_config, build_job_logs, build_crew_summary, build_route_segments,
     build_deployment_burndown, build_location_type_stats, build_traffic_analysis,
-    build_delay_report, filter_trackable, infer_location_type
+    build_delay_report, infer_location_type
 )
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -367,11 +367,16 @@ def load_all_data(data_dir):
 # ── Build global DataFrame ───────────────────────────────────────────────────
 
 DF_ALL = load_all_data(DATA_DIR)
+SNOW_CONFIG = load_config(os.path.join(DATA_DIR, "config", "snow_removal.json"))
 
 # Precompute lists for filters
 ALL_CHATS = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
-ALL_SENDERS = sorted(DF_ALL[DF_ALL["sender"] != ""]["sender"].unique()) if not DF_ALL.empty else []
-ALL_SENDERS_RESOLVED = sorted(
+_non_trackable_init = set(SNOW_CONFIG.get("non_trackable_senders", []))
+ALL_SENDERS = sorted(s for s in DF_ALL[DF_ALL["sender"] != ""]["sender"].unique()
+                     if s not in _non_trackable_init) if not DF_ALL.empty else []
+ALL_SENDERS_RESOLVED = sorted(s for s in DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique()
+                              if s not in _non_trackable_init) if not DF_ALL.empty else []
+ALL_SENDERS_RESOLVED_FULL = sorted(
     DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique()) if not DF_ALL.empty else []
 ALL_TYPES = sorted(DF_ALL["type"].unique()) if not DF_ALL.empty else []
 NOISE_TYPES = sorted(DF_ALL["noise_type"].unique()) if not DF_ALL.empty else []
@@ -425,7 +430,6 @@ def _compute_deployments(dates, gap_hours=24):
 
 
 ALL_DEPLOYMENTS_LIST = _compute_deployments(ALL_DATES)
-SNOW_CONFIG = load_config(os.path.join(DATA_DIR, "config", "snow_removal.json"))
 
 _date_to_deployment = {}
 for _dep in ALL_DEPLOYMENTS_LIST:
@@ -452,6 +456,10 @@ def get_filtered_df(chats, senders, noise_types, msg_types,
                     deployments=None):
     """Apply all sidebar filters to DF_ALL and return filtered copy."""
     df = DF_ALL.copy()
+
+    non_trackable = SNOW_CONFIG.get("non_trackable_senders", [])
+    if non_trackable:
+        df = df[~df["sender_resolved"].isin(non_trackable)]
 
     # Date range filter (use msg_date for accurate per-message filtering)
     if date_start:
@@ -1253,7 +1261,7 @@ app.layout = serve_layout
 
 def _reload_global_data():
     """Reload all global data variables after new files are uploaded."""
-    global DF_ALL, ALL_CHATS, ALL_SENDERS, ALL_SENDERS_RESOLVED, ALL_TYPES
+    global DF_ALL, ALL_CHATS, ALL_SENDERS, ALL_SENDERS_RESOLVED, ALL_SENDERS_RESOLVED_FULL, ALL_TYPES
     global NOISE_TYPES, DATE_MIN, DATE_MAX, ALL_DATES, ALL_DEPLOYMENTS_LIST
     global ALL_DEPLOYMENTS, _date_to_deployment
     global TOTAL_MSGS, CLEAN_MSGS, NOISE_MSGS, NUM_CHATS, NUM_SENDERS
@@ -1261,9 +1269,12 @@ def _reload_global_data():
 
     DF_ALL = load_all_data(DATA_DIR)
     ALL_CHATS = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
-    ALL_SENDERS = sorted(
-        DF_ALL[DF_ALL["sender"] != ""]["sender"].unique()) if not DF_ALL.empty else []
-    ALL_SENDERS_RESOLVED = sorted(
+    _nt = set(SNOW_CONFIG.get("non_trackable_senders", []))
+    ALL_SENDERS = sorted(s for s in DF_ALL[DF_ALL["sender"] != ""]["sender"].unique()
+                         if s not in _nt) if not DF_ALL.empty else []
+    ALL_SENDERS_RESOLVED = sorted(s for s in DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique()
+                                  if s not in _nt) if not DF_ALL.empty else []
+    ALL_SENDERS_RESOLVED_FULL = sorted(
         DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique()) if not DF_ALL.empty else []
     ALL_TYPES = sorted(DF_ALL["type"].unique()) if not DF_ALL.empty else []
     NOISE_TYPES = sorted(DF_ALL["noise_type"].unique()) if not DF_ALL.empty else []
@@ -3533,7 +3544,6 @@ def chart_routing_gantt(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
         if job_logs.empty:
             return _empty_fig("Crew Routing Timeline")
         segments = build_route_segments(job_logs, SNOW_CONFIG)
@@ -3576,7 +3586,6 @@ def chart_burndown(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
         burndown = build_deployment_burndown(job_logs, ALL_DEPLOYMENTS_LIST, SNOW_CONFIG)
         if burndown.empty:
             return _empty_fig("Deployment Burn-Down")
@@ -3612,7 +3621,6 @@ def location_type_stats(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
         stats = build_location_type_stats(job_logs)
         if stats.empty:
             return html.P("No location type data available.", className="text-muted p-3")
@@ -3640,7 +3648,6 @@ def traffic_analysis(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
         segments = build_route_segments(job_logs, SNOW_CONFIG)
         traffic = build_traffic_analysis(segments)
         if traffic.empty:
@@ -3668,7 +3675,6 @@ def delay_report(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
         segments = build_route_segments(job_logs, SNOW_CONFIG)
         delays = build_delay_report(segments, SNOW_CONFIG)
         if delays.empty:
@@ -3699,7 +3705,6 @@ def recall_summary(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
         if job_logs.empty or not job_logs["is_recall"].any():
             return html.P("No recalls found.", className="text-muted p-3")
         recalls = job_logs[job_logs["is_recall"]].copy()
@@ -3800,7 +3805,7 @@ def render_non_trackable_settings(active_tab):
         raise PreventUpdate
     non_trackable = SNOW_CONFIG.get("non_trackable_senders", [])
     items = []
-    for sender in ALL_SENDERS_RESOLVED:
+    for sender in ALL_SENDERS_RESOLVED_FULL:
         items.append(
             dbc.Checkbox(
                 id={"type": "non-track-cb", "sender": sender},

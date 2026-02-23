@@ -52,6 +52,12 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Non-trackable sender filtering applied globally
+  - Non-trackable senders now excluded from ALL metrics (KPIs, Overview, Productivity, Crew Analysis, Deployments, Operations)
+  - Filtering applied centrally in get_filtered_df so all callbacks automatically exclude non-trackable senders
+  - Sender dropdowns in sidebar no longer show non-trackable senders
+  - Removed redundant filter_trackable calls from Operations callbacks
+  - Settings tab still shows all senders for non-trackable management
 - 2026-02-23: Defensive error handling for all callbacks
   - All Operations callbacks wrapped with try/except (routing gantt, burndown, location type stats, traffic analysis, delay report, recall summary)
   - chart-sender-chat callback wrapped with error handling and limited to top 50 combinations
