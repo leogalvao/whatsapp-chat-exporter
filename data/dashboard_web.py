@@ -2519,6 +2519,7 @@ def download_deployment_report(n_clicks, chats, senders, quality, msg_types,
     .chart-row {{ page-break-inside: avoid; }}
     h2 {{ page-break-before: auto; }}
     .plotly-graph-div {{ max-height: 350px !important; }}
+    .modebar {{ display: none !important; }}
   }}
 </style>
 </head>
