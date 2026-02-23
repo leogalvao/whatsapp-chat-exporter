@@ -23,7 +23,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 from flask import request as flask_request, jsonify as flask_jsonify
-from dash import ALL, Dash, Input, Output, State, callback_context, dash_table, dcc, html
+from dash import ALL, Dash, Input, Output, State, callback_context, dash_table, dcc, html, no_update
+from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
 from domain_model import (
@@ -1303,7 +1304,6 @@ def _reload_global_data():
 )
 def handle_upload(contents_list, filenames_list):
     if not contents_list:
-        from dash import no_update
         return no_update, no_update
 
     archive_dir = os.path.join(DATA_DIR, "archive")
@@ -1556,29 +1556,36 @@ def chart_heatmap(chats, senders, quality, msg_types, time_range,
 @app.callback(Output("chart-sender-chat", "figure"), FILTER_INPUTS)
 def chart_sender_chat(chats, senders, quality, msg_types, time_range,
                       use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
-    scol = _sender_col(use_resolved)
-    df_valid = df[df[scol] != ""]
-    if df_valid.empty:
-        return _empty_fig("Sender × Chat Participation")
+    try:
+        df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                     date_start, date_end, deployments)
+        scol = _sender_col(use_resolved)
+        if scol not in df.columns:
+            return _empty_fig("Sender × Chat Participation")
+        df_valid = df[df[scol] != ""]
+        if df_valid.empty:
+            return _empty_fig("Sender × Chat Participation")
 
-    counts = (df_valid.groupby([scol, "chat"])
-              .size().reset_index(name="count"))
-    fig = px.bar(
-        counts, x="chat", y="count", color=scol,
-        text="count", barmode="group",
-        title="Sender × Chat Participation",
-        labels={"count": "Messages", "chat": "Chat", scol: "Sender"},
-    )
-    fig.update_traces(textposition="outside", textfont_size=10)
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=400,
-        xaxis_tickangle=-30,
-        legend=dict(font=dict(size=10)),
-    )
-    return fig
+        counts = (df_valid.groupby([scol, "chat"])
+                  .size().reset_index(name="count"))
+        top_combos = counts.nlargest(50, "count")
+        fig = px.bar(
+            top_combos, x="chat", y="count", color=scol,
+            text="count", barmode="group",
+            title="Sender × Chat Participation",
+            labels={"count": "Messages", "chat": "Chat", scol: "Sender"},
+        )
+        fig.update_traces(textposition="outside", textfont_size=10)
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=40, b=10),
+            height=400,
+            xaxis_tickangle=-30,
+            legend=dict(font=dict(size=10)),
+        )
+        return fig
+    except Exception as e:
+        print(f"[chart-sender-chat] Error: {e}")
+        return _empty_fig("Sender × Chat Participation")
 
 
 # ── Chart 5: Activity Timeline ──────────────────────────────────────────────
@@ -3522,208 +3529,232 @@ def chart_idle_gaps(chats, senders, quality, msg_types, time_range,
 @app.callback(Output("chart-routing-gantt", "figure"), FILTER_INPUTS)
 def chart_routing_gantt(chats, senders, quality, msg_types, time_range,
                         use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
-    job_logs = build_job_logs(df, SNOW_CONFIG)
-    job_logs = filter_trackable(job_logs, SNOW_CONFIG)
-    if job_logs.empty:
+    try:
+        df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                     date_start, date_end, deployments)
+        job_logs = build_job_logs(df, SNOW_CONFIG)
+        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
+        if job_logs.empty:
+            return _empty_fig("Crew Routing Timeline")
+        segments = build_route_segments(job_logs, SNOW_CONFIG)
+        if segments.empty:
+            return _empty_fig("Crew Routing Timeline")
+        gantt_data = []
+        for _, seg in segments.iterrows():
+            t0 = seg["start_time"]
+            t1 = seg["end_time"]
+            if pd.isna(t0) or pd.isna(t1):
+                continue
+            gantt_data.append({
+                "Crew": seg["crew"],
+                "Start": t0,
+                "Finish": t1,
+                "Location": seg["destination_location"] or "Unknown",
+            })
+        if not gantt_data:
+            return _empty_fig("Crew Routing Timeline")
+        gantt_df = pd.DataFrame(gantt_data)
+        fig = px.timeline(
+            gantt_df, x_start="Start", x_end="Finish", y="Crew", color="Location",
+            title="Crew Routing Timeline",
+        )
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=40, b=10),
+            height=450,
+            yaxis={"categoryorder": "category ascending"},
+        )
+        return fig
+    except Exception as e:
+        print(f"[chart-routing-gantt] Error: {e}")
         return _empty_fig("Crew Routing Timeline")
-    segments = build_route_segments(job_logs, SNOW_CONFIG)
-    if segments.empty:
-        return _empty_fig("Crew Routing Timeline")
-    gantt_data = []
-    for _, seg in segments.iterrows():
-        t0 = seg["start_time"]
-        t1 = seg["end_time"]
-        if pd.isna(t0) or pd.isna(t1):
-            continue
-        gantt_data.append({
-            "Crew": seg["crew"],
-            "Start": t0,
-            "Finish": t1,
-            "Location": seg["destination_location"] or "Unknown",
-        })
-    if not gantt_data:
-        return _empty_fig("Crew Routing Timeline")
-    gantt_df = pd.DataFrame(gantt_data)
-    fig = px.timeline(
-        gantt_df, x_start="Start", x_end="Finish", y="Crew", color="Location",
-        title="Crew Routing Timeline",
-    )
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=450,
-        yaxis={"categoryorder": "category ascending"},
-    )
-    return fig
 
 
 @app.callback(Output("chart-burndown", "figure"), FILTER_INPUTS)
 def chart_burndown(chats, senders, quality, msg_types, time_range,
                    use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
-    job_logs = build_job_logs(df, SNOW_CONFIG)
-    job_logs = filter_trackable(job_logs, SNOW_CONFIG)
-    burndown = build_deployment_burndown(job_logs, ALL_DEPLOYMENTS_LIST, SNOW_CONFIG)
-    if burndown.empty:
+    try:
+        df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                     date_start, date_end, deployments)
+        job_logs = build_job_logs(df, SNOW_CONFIG)
+        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
+        burndown = build_deployment_burndown(job_logs, ALL_DEPLOYMENTS_LIST, SNOW_CONFIG)
+        if burndown.empty:
+            return _empty_fig("Deployment Burn-Down")
+        fig = go.Figure()
+        for dep_label in burndown["deployment"].unique():
+            dep_data = burndown[burndown["deployment"] == dep_label]
+            fig.add_trace(go.Scatter(
+                x=dep_data["timestamp"], y=dep_data["cumulative_completed"],
+                mode="lines+markers", name=f"{dep_label} (actual)",
+                line=dict(dash="solid"),
+            ))
+            fig.add_trace(go.Scatter(
+                x=dep_data["timestamp"], y=dep_data["expected_completed"],
+                mode="lines", name=f"{dep_label} (expected)",
+                line=dict(dash="dash"),
+            ))
+        fig.update_layout(
+            title="Deployment Burn-Down: Actual vs Expected",
+            xaxis_title="Time", yaxis_title="Cumulative Sites Completed",
+            margin=dict(l=10, r=10, t=40, b=10),
+            height=400,
+        )
+        return fig
+    except Exception as e:
+        print(f"[chart-burndown] Error: {e}")
         return _empty_fig("Deployment Burn-Down")
-    fig = go.Figure()
-    for dep_label in burndown["deployment"].unique():
-        dep_data = burndown[burndown["deployment"] == dep_label]
-        fig.add_trace(go.Scatter(
-            x=dep_data["timestamp"], y=dep_data["cumulative_completed"],
-            mode="lines+markers", name=f"{dep_label} (actual)",
-            line=dict(dash="solid"),
-        ))
-        fig.add_trace(go.Scatter(
-            x=dep_data["timestamp"], y=dep_data["expected_completed"],
-            mode="lines", name=f"{dep_label} (expected)",
-            line=dict(dash="dash"),
-        ))
-    fig.update_layout(
-        title="Deployment Burn-Down: Actual vs Expected",
-        xaxis_title="Time", yaxis_title="Cumulative Sites Completed",
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=400,
-    )
-    return fig
 
 
 @app.callback(Output("location-type-stats-container", "children"), FILTER_INPUTS)
 def location_type_stats(chats, senders, quality, msg_types, time_range,
                         use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
-    job_logs = build_job_logs(df, SNOW_CONFIG)
-    job_logs = filter_trackable(job_logs, SNOW_CONFIG)
-    stats = build_location_type_stats(job_logs)
-    if stats.empty:
-        return html.P("No location type data available.", className="text-muted p-3")
-    fig = px.bar(
-        stats, x="location_type", y="avg_duration_min",
-        text="avg_duration_min", color="location_type",
-        title="Avg Service Time by Location Type",
-        labels={"avg_duration_min": "Avg Duration (min)", "location_type": "Type"},
-    )
-    fig.update_traces(textposition="outside", texttemplate="%{text:.1f}")
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=350, showlegend=False,
-    )
-    return dcc.Graph(figure=fig)
+    try:
+        df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                     date_start, date_end, deployments)
+        job_logs = build_job_logs(df, SNOW_CONFIG)
+        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
+        stats = build_location_type_stats(job_logs)
+        if stats.empty:
+            return html.P("No location type data available.", className="text-muted p-3")
+        fig = px.bar(
+            stats, x="location_type", y="avg_duration_min",
+            text="avg_duration_min", color="location_type",
+            title="Avg Service Time by Location Type",
+            labels={"avg_duration_min": "Avg Duration (min)", "location_type": "Type"},
+        )
+        fig.update_traces(textposition="outside", texttemplate="%{text:.1f}")
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=40, b=10),
+            height=350, showlegend=False,
+        )
+        return dcc.Graph(figure=fig)
+    except Exception as e:
+        print(f"[location-type-stats] Error: {e}")
+        return html.P("Error loading location type stats.", className="text-muted p-3")
 
 
 @app.callback(Output("traffic-analysis-container", "children"), FILTER_INPUTS)
 def traffic_analysis(chats, senders, quality, msg_types, time_range,
                      use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
-    job_logs = build_job_logs(df, SNOW_CONFIG)
-    job_logs = filter_trackable(job_logs, SNOW_CONFIG)
-    segments = build_route_segments(job_logs, SNOW_CONFIG)
-    traffic = build_traffic_analysis(segments)
-    if traffic.empty:
-        return html.P("No traffic data available.", className="text-muted p-3")
-    return html.Div([
-        html.H6("Avg Travel Time Between Locations", className="mb-2"),
-        dash_table.DataTable(
-            data=traffic.to_dict("records"),
-            columns=[{"name": c, "id": c} for c in traffic.columns],
-            style_table={"overflowX": "auto", "maxHeight": "300px", "overflowY": "auto"},
-            style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
-            style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
-            page_size=10,
-        ),
-    ])
+    try:
+        df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                     date_start, date_end, deployments)
+        job_logs = build_job_logs(df, SNOW_CONFIG)
+        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
+        segments = build_route_segments(job_logs, SNOW_CONFIG)
+        traffic = build_traffic_analysis(segments)
+        if traffic.empty:
+            return html.P("No traffic data available.", className="text-muted p-3")
+        return html.Div([
+            html.H6("Avg Travel Time Between Locations", className="mb-2"),
+            dash_table.DataTable(
+                data=traffic.to_dict("records"),
+                columns=[{"name": c, "id": c} for c in traffic.columns],
+                style_table={"overflowX": "auto", "maxHeight": "300px", "overflowY": "auto"},
+                style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
+                style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
+                page_size=10,
+            ),
+        ])
+    except Exception as e:
+        print(f"[traffic-analysis] Error: {e}")
+        return html.P("Error loading traffic analysis.", className="text-muted p-3")
 
 
 @app.callback(Output("delay-report-container", "children"), FILTER_INPUTS)
 def delay_report(chats, senders, quality, msg_types, time_range,
                  use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
-    job_logs = build_job_logs(df, SNOW_CONFIG)
-    job_logs = filter_trackable(job_logs, SNOW_CONFIG)
-    segments = build_route_segments(job_logs, SNOW_CONFIG)
-    delays = build_delay_report(segments, SNOW_CONFIG)
-    if delays.empty:
-        return html.P("No delayed segments found.", className="text-muted p-3")
-    display = delays.copy()
-    if "date" in display.columns:
-        display["date"] = display["date"].astype(str)
-    return html.Div([
-        html.H6("Delay Report — Segments Exceeding Expected Time", className="mb-2"),
-        dash_table.DataTable(
-            data=display.to_dict("records"),
-            columns=[{"name": c, "id": c} for c in display.columns],
-            style_table={"overflowX": "auto", "maxHeight": "350px", "overflowY": "auto"},
-            style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
-            style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
-            page_size=15,
-        ),
-    ])
+    try:
+        df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                     date_start, date_end, deployments)
+        job_logs = build_job_logs(df, SNOW_CONFIG)
+        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
+        segments = build_route_segments(job_logs, SNOW_CONFIG)
+        delays = build_delay_report(segments, SNOW_CONFIG)
+        if delays.empty:
+            return html.P("No delayed segments found.", className="text-muted p-3")
+        display = delays.copy()
+        if "date" in display.columns:
+            display["date"] = display["date"].astype(str)
+        return html.Div([
+            html.H6("Delay Report — Segments Exceeding Expected Time", className="mb-2"),
+            dash_table.DataTable(
+                data=display.to_dict("records"),
+                columns=[{"name": c, "id": c} for c in display.columns],
+                style_table={"overflowX": "auto", "maxHeight": "350px", "overflowY": "auto"},
+                style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
+                style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
+                page_size=15,
+            ),
+        ])
+    except Exception as e:
+        print(f"[delay-report] Error: {e}")
+        return html.P("Error loading delay report.", className="text-muted p-3")
 
 
 @app.callback(Output("recall-summary-container", "children"), FILTER_INPUTS)
 def recall_summary(chats, senders, quality, msg_types, time_range,
                    use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
-    job_logs = build_job_logs(df, SNOW_CONFIG)
-    job_logs = filter_trackable(job_logs, SNOW_CONFIG)
-    if job_logs.empty or not job_logs["is_recall"].any():
-        return html.P("No recalls found.", className="text-muted p-3")
-    recalls = job_logs[job_logs["is_recall"]].copy()
-    total_recalls = len(recalls)
-    total_added = recalls["recall_added_time_mins"].sum()
-    crew_recalls = recalls.groupby("crew").agg(
-        recall_count=("is_recall", "sum"),
-        total_added_min=("recall_added_time_mins", "sum"),
-    ).reset_index()
-    crew_recalls["total_added_min"] = crew_recalls["total_added_min"].round(1)
-    loc_recalls = recalls.groupby("location")["is_recall"].count().reset_index()
-    loc_recalls.columns = ["location", "recall_count"]
-    loc_recalls = loc_recalls.sort_values("recall_count", ascending=False).head(10)
-    return html.Div([
-        html.H6("Recall Summary", className="mb-2"),
-        dbc.Row([
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H3(str(total_recalls), className="text-primary"),
-                html.Small("Total Recalls"),
-            ]), className="text-center"), md=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H3(f"{total_added:.0f}" if pd.notna(total_added) else "N/A", className="text-warning"),
-                html.Small("Total Added Minutes"),
-            ]), className="text-center"), md=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H3(str(crew_recalls["crew"].nunique()), className="text-info"),
-                html.Small("Crews with Recalls"),
-            ]), className="text-center"), md=3),
-        ], className="mb-3"),
-        dbc.Row([
-            dbc.Col([
-                html.P("Recalls by Crew", className="fw-bold mb-1"),
-                dash_table.DataTable(
-                    data=crew_recalls.to_dict("records"),
-                    columns=[{"name": c, "id": c} for c in crew_recalls.columns],
-                    style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
-                    style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
-                    page_size=10,
-                ),
-            ], md=6),
-            dbc.Col([
-                html.P("Top Recalled Locations", className="fw-bold mb-1"),
-                dash_table.DataTable(
-                    data=loc_recalls.to_dict("records"),
-                    columns=[{"name": c, "id": c} for c in loc_recalls.columns],
-                    style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
-                    style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
-                    page_size=10,
-                ),
-            ], md=6),
-        ]),
-    ])
+    try:
+        df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                     date_start, date_end, deployments)
+        job_logs = build_job_logs(df, SNOW_CONFIG)
+        job_logs = filter_trackable(job_logs, SNOW_CONFIG)
+        if job_logs.empty or not job_logs["is_recall"].any():
+            return html.P("No recalls found.", className="text-muted p-3")
+        recalls = job_logs[job_logs["is_recall"]].copy()
+        total_recalls = len(recalls)
+        total_added = recalls["recall_added_time_mins"].sum()
+        crew_recalls = recalls.groupby("crew").agg(
+            recall_count=("is_recall", "sum"),
+            total_added_min=("recall_added_time_mins", "sum"),
+        ).reset_index()
+        crew_recalls["total_added_min"] = crew_recalls["total_added_min"].round(1)
+        loc_recalls = recalls.groupby("location")["is_recall"].count().reset_index()
+        loc_recalls.columns = ["location", "recall_count"]
+        loc_recalls = loc_recalls.sort_values("recall_count", ascending=False).head(10)
+        return html.Div([
+            html.H6("Recall Summary", className="mb-2"),
+            dbc.Row([
+                dbc.Col(dbc.Card(dbc.CardBody([
+                    html.H3(str(total_recalls), className="text-primary"),
+                    html.Small("Total Recalls"),
+                ]), className="text-center"), md=3),
+                dbc.Col(dbc.Card(dbc.CardBody([
+                    html.H3(f"{total_added:.0f}" if pd.notna(total_added) else "N/A", className="text-warning"),
+                    html.Small("Total Added Minutes"),
+                ]), className="text-center"), md=3),
+                dbc.Col(dbc.Card(dbc.CardBody([
+                    html.H3(str(crew_recalls["crew"].nunique()), className="text-info"),
+                    html.Small("Crews with Recalls"),
+                ]), className="text-center"), md=3),
+            ], className="mb-3"),
+            dbc.Row([
+                dbc.Col([
+                    html.P("Recalls by Crew", className="fw-bold mb-1"),
+                    dash_table.DataTable(
+                        data=crew_recalls.to_dict("records"),
+                        columns=[{"name": c, "id": c} for c in crew_recalls.columns],
+                        style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
+                        style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
+                        page_size=10,
+                    ),
+                ], md=6),
+                dbc.Col([
+                    html.P("Top Recalled Locations", className="fw-bold mb-1"),
+                    dash_table.DataTable(
+                        data=loc_recalls.to_dict("records"),
+                        columns=[{"name": c, "id": c} for c in loc_recalls.columns],
+                        style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
+                        style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
+                        page_size=10,
+                    ),
+                ], md=6),
+            ]),
+        ])
+    except Exception as e:
+        print(f"[recall-summary] Error: {e}")
+        return html.P("Error loading recall summary.", className="text-muted p-3")
 
 
 # ── Settings Tab Callbacks ───────────────────────────────────────────────────
@@ -3734,7 +3765,7 @@ def recall_summary(chats, senders, quality, msg_types, time_range,
 )
 def render_crew_type_settings(active_tab):
     if active_tab != "tab-settings":
-        raise dash.exceptions.PreventUpdate
+        raise PreventUpdate
     loc_types = SNOW_CONFIG.get("location_types", {})
     rows = []
     for chat in ALL_CHATS:
@@ -3766,7 +3797,7 @@ def render_crew_type_settings(active_tab):
 )
 def render_non_trackable_settings(active_tab):
     if active_tab != "tab-settings":
-        raise dash.exceptions.PreventUpdate
+        raise PreventUpdate
     non_trackable = SNOW_CONFIG.get("non_trackable_senders", [])
     items = []
     for sender in ALL_SENDERS_RESOLVED:
@@ -3798,7 +3829,7 @@ def save_settings(n_clicks, crew_values, crew_ids, track_values, track_ids,
                   expected_hours, svc_sidewalk, svc_parking):
     global SNOW_CONFIG
     if not n_clicks:
-        raise dash.exceptions.PreventUpdate
+        raise PreventUpdate
 
     loc_types = {}
     if crew_ids and crew_values:

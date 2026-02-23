@@ -52,6 +52,12 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Defensive error handling for all callbacks
+  - All Operations callbacks wrapped with try/except (routing gantt, burndown, location type stats, traffic analysis, delay report, recall summary)
+  - chart-sender-chat callback wrapped with error handling and limited to top 50 combinations
+  - Domain model build_job_logs validates required columns before processing
+  - All errors logged to console with descriptive prefixes for debugging
+  - Callbacks return empty figures/placeholders on error instead of crashing
 - 2026-02-23: Settings tab and cleanup
   - Added Settings tab with crew location type assignment (Sidewalk/Parking Lot/Auto-detect)
   - Added non-trackable sender management via checkboxes

@@ -129,6 +129,11 @@ def build_job_logs(df, config):
     if df is None or df.empty:
         return _empty_df(cols)
 
+    required_cols = ["type", "location", "sender_resolved", "chat", "time", "msg_date"]
+    for rc in required_cols:
+        if rc not in df.columns:
+            return _empty_df(cols)
+
     mask = (df["type"] == "image") | (df["location"].astype(str).str.len() > 0)
     subset = df.loc[mask].copy()
 
