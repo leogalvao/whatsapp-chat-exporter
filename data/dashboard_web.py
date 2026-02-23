@@ -1,0 +1,2065 @@
+#!/usr/bin/env python3
+"""Browser-based interactive WhatsApp chat dashboard using Plotly Dash.
+
+Reads all whatsapp_*.json exports, applies noise filtering, and provides
+a rich interactive dashboard at http://localhost:8050.
+
+Usage:
+    pip install dash dash-bootstrap-components
+    python3 dashboard_web.py
+"""
+
+import glob
+import json
+import os
+import re
+import unicodedata
+from datetime import datetime, date
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from dash import Dash, Input, Output, State, callback_context, dash_table, dcc, html
+import dash_bootstrap_components as dbc
+
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ── Timestamp parsing ────────────────────────────────────────────────────────
+
+def parse_msg_datetime(msg, export_date=None):
+    """Resolve a message's datetime using the best available field.
+
+    Priority:
+      1. ``dateTime`` (ISO 8601, e.g. "2026-02-10T14:40:00")
+      2. ``date`` + ``timestamp`` combined
+      3. ``timestamp`` + *export_date* fallback
+    """
+    # 1. Try dateTime field (most accurate)
+    dt_str = msg.get("dateTime")
+    if dt_str:
+        try:
+            return datetime.fromisoformat(dt_str)
+        except (ValueError, TypeError):
+            pass
+
+    ts_str = (msg.get("timestamp") or "").strip()
+    date_str = msg.get("date")  # e.g. "2026-02-10"
+
+    # 2. Try date + timestamp combined
+    if date_str and ts_str:
+        try:
+            d = date.fromisoformat(date_str)
+            t = datetime.strptime(ts_str, "%I:%M %p")
+            return t.replace(year=d.year, month=d.month, day=d.day)
+        except (ValueError, TypeError):
+            pass
+
+    # 3. Fallback: timestamp + export_date
+    if ts_str:
+        try:
+            t = datetime.strptime(ts_str, "%I:%M %p")
+            if export_date:
+                return t.replace(year=export_date.year, month=export_date.month,
+                                 day=export_date.day)
+            return t.replace(year=2026, month=2, day=8)
+        except ValueError:
+            pass
+
+    return None
+
+
+# ── Data loading & cleaning ──────────────────────────────────────────────────
+
+# Patterns for content cleaning
+RE_PHONE = re.compile(r"\+1\s*\(\d{3}\)\s*\d{3}[- ]?\d{4}")
+UI_TOKENS = ["wds-ic-hd-filled", "tail-in", "forward-refreshed",
+             "default-group-refreshed", "camera-v2"]
+RE_TRAILING_TIME = re.compile(r"\d{1,2}:\d{2}\s*[AP]M\s*$")
+
+# Patterns for detecting fake senders (locations / captions the exporter
+# mistakenly placed in the sender field).
+_RE_ADDR_SUFFIX = re.compile(
+    r"\b(st|ave|rd|street|drive|dr|road)\s+(nw|ne|sw|se)\b", re.I)
+_RE_INTERSECTION = re.compile(
+    r"\b(st|ave|av|rd|street)\b.*&|\&.*\b(st|ave|av|rd|street)\b", re.I)
+_RE_LOCATION_WORD = re.compile(
+    r"\b(school|elementary|housing|annex|camp|education|church|park)\b", re.I)
+_RE_PHONE_SENDER = re.compile(r"^[@+]")
+_RE_PHOTO_COUNT = re.compile(r"^\d+\s+photos?$", re.I)
+
+
+def _is_fake_sender(name):
+    """Return True if *name* looks like a location, address, or UI artifact
+    rather than a real person's name."""
+    if not name:
+        return False
+    if _RE_ADDR_SUFFIX.search(name):
+        return True
+    if _RE_INTERSECTION.search(name):
+        return True
+    if _RE_LOCATION_WORD.search(name):
+        return True
+    if _RE_PHONE_SENDER.match(name):
+        return True
+    if _RE_PHOTO_COUNT.match(name):
+        return True
+    return False
+
+
+def clean_content(text):
+    """Strip CSS blobs, phone numbers, UI tokens, trailing timestamps."""
+    if not text:
+        return ""
+    # Remove CSS blocks
+    text = re.sub(r"\.cdf40d50ba[\s\S]*", "", text)
+    # Remove phone numbers
+    text = RE_PHONE.sub("", text)
+    # Remove UI tokens
+    for tok in UI_TOKENS:
+        text = text.replace(tok, "")
+    # Remove trailing duplicate timestamps
+    text = RE_TRAILING_TIME.sub("", text)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+# ── Location extraction ──────────────────────────────────────────────────────
+
+# Street address pattern: optional number, street name, suffix + direction
+_RE_STREET_ADDR = re.compile(
+    r"\d{1,5}[-–]?\d{0,5}\s+[\w\s]{2,40}\b"
+    r"(st|ave|avenue|rd|road|drive|dr|street|blvd|boulevard|pl|place|ct|court"
+    r"|way|ln|lane)\s+(nw|ne|sw|se)\b",
+    re.I,
+)
+
+# Named-place pattern: content contains a known place keyword
+_RE_NAMED_PLACE = re.compile(
+    r"\b(school|elementary|recreation\s+center|community\s+center"
+    r"|church|housing|annex|camp|park|center|library|plaza)\b",
+    re.I,
+)
+
+# Things that look like locations but aren't
+_RE_SUPPLY_COUNT = re.compile(r"^\d+\s+(bags?|boxes?|loads?|pallets?|tons?)$", re.I)
+_RE_IMAGE_TAG = re.compile(r"^\[Image\]$", re.I)
+
+
+def _normalize_location(loc):
+    """Lowercase, collapse whitespace, normalize street abbreviations."""
+    loc = loc.lower().strip()
+    loc = re.sub(r"\s+", " ", loc)
+    # Normalize common abbreviations
+    loc = re.sub(r"\bavenue\b", "ave", loc)
+    loc = re.sub(r"\bstreet\b", "st", loc)
+    loc = re.sub(r"\broad\b", "rd", loc)
+    loc = re.sub(r"\bdrive\b", "dr", loc)
+    loc = re.sub(r"\bboulevard\b", "blvd", loc)
+    loc = re.sub(r"\bplace\b", "pl", loc)
+    loc = re.sub(r"\bcourt\b", "ct", loc)
+    loc = re.sub(r"\blane\b", "ln", loc)
+    return loc
+
+
+def extract_location(content):
+    """Extract a location from message content, or return empty string.
+
+    Two-tier approach:
+      1. Street addresses like "310-0324 Kennedy St NW"
+      2. Named places containing keywords like "school", "recreation center"
+
+    Excludes [Image] tags, supply counts ("5 bags"), and very short/long strings.
+    """
+    if not content:
+        return ""
+    # Skip non-location content
+    if _RE_IMAGE_TAG.match(content):
+        return ""
+    if _RE_SUPPLY_COUNT.match(content):
+        return ""
+    # Too short or too long to be a useful location
+    if len(content) < 5 or len(content) > 200:
+        return ""
+
+    # Tier 1: street address
+    m = _RE_STREET_ADDR.search(content)
+    if m:
+        return _normalize_location(m.group(0))
+
+    # Tier 2: named place — use the full content as the location
+    if _RE_NAMED_PLACE.search(content):
+        # Trim to first line / sentence for cleanliness
+        loc = content.split("\n")[0].strip()
+        if len(loc) > 100:
+            loc = loc[:100]
+        return _normalize_location(loc)
+
+    return ""
+
+
+def classify_noise(msg):
+    """Classify a message into a noise type.
+
+    Accepts the full message dict so v1.5 fields (dateTime, date) can
+    distinguish real empty-sender messages from legacy captions.
+    """
+    sender = msg.get("sender", "") or ""
+    ts_str = msg.get("timestamp", "") or ""
+    content = msg.get("content", "") or ""
+
+    if not sender and not ts_str:
+        return "system_metadata"
+    if len(content) > 500 and ".cdf40d50ba" in content:
+        return "css_html"
+    if "This message couldn\u0027t load" in content or \
+       "This message couldn\u2019t load" in content:
+        return "load_error"
+    if ts_str and not sender:
+        # v1.5 exports include dateTime/date — empty sender is an export
+        # artifact, not a media caption.  Treat as clean.
+        if msg.get("dateTime") or msg.get("date"):
+            return "clean"
+        return "empty_sender_caption"
+    return "clean"
+
+
+def parse_export_date(iso_str):
+    """Extract date from ISO 8601 exportDate string."""
+    try:
+        return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).date()
+    except (ValueError, AttributeError):
+        return date(2026, 2, 8)
+
+
+EXCLUDE_DIRS = {".claude", "__pycache__", "node_modules"}
+
+
+def _normalize_chat_name(name):
+    """Normalize a chat name for de-duplication.
+
+    Folds accents (ñ→n, é→e) and lowercases so that variants like
+    "Julian Ordoñez Sidewalks" / "Julian Ordonez sidewalks" merge.
+    """
+    nfkd = unicodedata.normalize("NFKD", name)
+    stripped = "".join(ch for ch in nfkd if unicodedata.category(ch) != "Mn")
+    return stripped.lower().strip()
+
+
+def _discover_json_files(data_dir):
+    """Find all WhatsApp JSON exports under *data_dir*.
+
+    Sources (in order):
+      1. ``archive/whatsapp_*.json``  — legacy archive exports
+      2. ``<Worker>/<timestamp_dir>/<Worker>.json`` — new v1.2 subfolder exports
+    Directories in EXCLUDE_DIRS are skipped.
+    """
+    paths = []
+
+    # 1. Archive exports
+    for p in glob.glob(os.path.join(data_dir, "archive", "whatsapp_*.json")):
+        paths.append(p)
+
+    # 2. Subfolder exports (recursive)
+    for root, dirs, files in os.walk(data_dir):
+        # Skip excluded dirs
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and d != "archive"]
+        for fn in files:
+            if fn.endswith(".json"):
+                paths.append(os.path.join(root, fn))
+
+    return sorted(set(paths))
+
+
+def load_all_data(data_dir):
+    """Load all JSON chat files, de-duplicate by chatName, build DataFrame.
+
+    Chat names are normalized (case-insensitive, accent-folded) so that
+    variants like "Julián Ordóñez" and "julian ordonez" merge into one group.
+    The canonical display name is taken from the file with the most messages.
+    """
+    # Collect all files grouped by *normalized* chatName; keep the one with
+    # most messages and use its original name for display.
+    chat_files = {}  # norm_key -> (path, msgs, export_date, display_name)
+    for path in _discover_json_files(data_dir):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if "exportInfo" not in data or "messages" not in data:
+                continue
+        except (json.JSONDecodeError, KeyError):
+            continue
+        name = data["exportInfo"]["chatName"]
+        key = _normalize_chat_name(name)
+        msgs = data["messages"]
+        export_date = parse_export_date(data["exportInfo"].get("exportDate", ""))
+        if key not in chat_files or len(msgs) > len(chat_files[key][1]):
+            chat_files[key] = (path, msgs, export_date, name)
+
+    rows = []
+    for _key, (path, msgs, export_date, chat_name) in chat_files.items():
+        prev_sender = ""
+        for m in msgs:
+            sender = m.get("sender", "") or ""
+            ts_str = m.get("timestamp", "") or ""
+            content_raw = m.get("content", "") or ""
+            msg_type = m.get("type", "text") or "text"
+            ts = parse_msg_datetime(m, export_date)
+
+            # Detect fake senders (locations/captions in the sender field).
+            # Move the fake name into content when original content is empty
+            # or just "[Image]", then treat sender as empty.
+            if _is_fake_sender(sender):
+                if not content_raw or content_raw == "[Image]":
+                    content_raw = sender
+                sender = ""
+
+            noise = classify_noise(m)
+            content_clean = clean_content(content_raw)
+
+            # Resolve sender for captions
+            sender_resolved = sender if sender else prev_sender
+            if sender:
+                prev_sender = sender
+
+            msg_date = ts.date() if ts else (export_date if export_date else None)
+
+            rows.append({
+                "chat": chat_name,
+                "sender": sender,
+                "sender_resolved": sender_resolved,
+                "timestamp": ts_str,
+                "time": ts,
+                "hour": ts.hour + ts.minute / 60.0 if ts else None,
+                "hour_int": ts.hour if ts else None,
+                "msg_date": msg_date,
+                "type": msg_type,
+                "content_raw": content_raw,
+                "content": content_clean,
+                "content_len": len(content_clean),
+                "location": extract_location(content_clean),
+                "noise_type": noise,
+                "export_date": export_date,
+            })
+
+    df = pd.DataFrame(rows)
+    df["export_date"] = pd.to_datetime(df["export_date"])
+    df["msg_date"] = pd.to_datetime(df["msg_date"])
+    return df
+
+
+# ── Build global DataFrame ───────────────────────────────────────────────────
+
+DF_ALL = load_all_data(DATA_DIR)
+
+# Precompute lists for filters
+ALL_CHATS = sorted(DF_ALL["chat"].unique())
+ALL_SENDERS = sorted(DF_ALL[DF_ALL["sender"] != ""]["sender"].unique())
+ALL_SENDERS_RESOLVED = sorted(
+    DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique())
+ALL_TYPES = sorted(DF_ALL["type"].unique())
+NOISE_TYPES = sorted(DF_ALL["noise_type"].unique())
+
+# Date range (prefer msg_date when available, fall back to export_date)
+_date_col = DF_ALL["msg_date"].dropna()
+if _date_col.empty:
+    _date_col = DF_ALL["export_date"].dropna()
+DATE_MIN = _date_col.min().date() if not _date_col.empty else date(2026, 2, 8)
+DATE_MAX = _date_col.max().date() if not _date_col.empty else date(2026, 2, 8)
+ALL_DATES = sorted(DF_ALL["msg_date"].dropna().dt.date.unique())
+
+# Stats
+TOTAL_MSGS = len(DF_ALL)
+CLEAN_MSGS = len(DF_ALL[DF_ALL["noise_type"] == "clean"])
+NOISE_MSGS = TOTAL_MSGS - CLEAN_MSGS
+NUM_CHATS = DF_ALL["chat"].nunique()
+NUM_SENDERS = len(ALL_SENDERS_RESOLVED)
+
+
+# ── Helper: filtered DataFrame ───────────────────────────────────────────────
+
+def get_filtered_df(chats, senders, noise_types, msg_types,
+                    time_range, use_resolved, date_start=None, date_end=None):
+    """Apply all sidebar filters to DF_ALL and return filtered copy."""
+    df = DF_ALL.copy()
+
+    # Date range filter (use msg_date for accurate per-message filtering)
+    if date_start:
+        df = df[df["msg_date"] >= pd.Timestamp(date_start)]
+    if date_end:
+        df = df[df["msg_date"] <= pd.Timestamp(date_end)]
+
+    # Chat filter
+    if chats:
+        df = df[df["chat"].isin(chats)]
+
+    # Sender filter
+    sender_col = "sender_resolved" if use_resolved else "sender"
+    if senders:
+        df = df[df[sender_col].isin(senders)]
+
+    # Noise type filter
+    if noise_types:
+        df = df[df["noise_type"].isin(noise_types)]
+
+    # Message type filter
+    if msg_types:
+        df = df[df["type"].isin(msg_types)]
+
+    # Time range filter (hour slider)
+    if time_range and len(time_range) == 2:
+        lo, hi = time_range
+        df = df[(df["hour"].notna()) & (df["hour"] >= lo) & (df["hour"] < hi)]
+
+    return df
+
+
+# ── Dash app ─────────────────────────────────────────────────────────────────
+
+app = Dash(
+    __name__,
+    external_stylesheets=[dbc.themes.FLATLY],
+    suppress_callback_exceptions=True,
+)
+app.title = "WhatsApp Chat Dashboard"
+
+# ── Sidebar ──────────────────────────────────────────────────────────────────
+
+sidebar = dbc.Card(
+    [
+        dbc.CardHeader(html.H5("Filters", className="mb-0")),
+        dbc.CardBody(
+            [
+                # Chat groups
+                html.Label("Chat Groups", className="fw-bold mb-1"),
+                dcc.Dropdown(
+                    id="filter-chats",
+                    options=[{"label": c, "value": c} for c in ALL_CHATS],
+                    value=ALL_CHATS,
+                    multi=True,
+                    placeholder="Select chats...",
+                    className="mb-3",
+                ),
+
+                # Senders
+                html.Label("Senders", className="fw-bold mb-1"),
+                dcc.Dropdown(
+                    id="filter-senders",
+                    options=[{"label": s, "value": s}
+                             for s in ALL_SENDERS_RESOLVED],
+                    value=ALL_SENDERS_RESOLVED,
+                    multi=True,
+                    placeholder="Select senders...",
+                    className="mb-3",
+                ),
+
+                # Message type
+                html.Label("Message Type", className="fw-bold mb-1"),
+                dbc.Checklist(
+                    id="filter-types",
+                    options=[{"label": t.title(), "value": t}
+                             for t in ALL_TYPES],
+                    value=ALL_TYPES,
+                    inline=True,
+                    className="mb-3",
+                ),
+
+                # Time range slider
+                html.Label("Time Range (hour)", className="fw-bold mb-1"),
+                dcc.RangeSlider(
+                    id="filter-time",
+                    min=0, max=24, step=1,
+                    value=[0, 24],
+                    marks={h: f"{h % 12 or 12}{'a' if h < 12 else 'p'}"
+                           for h in range(0, 25, 3)},
+                    className="mb-3",
+                ),
+
+                # Quality filter
+                html.Label("Data Quality", className="fw-bold mb-1"),
+                dbc.RadioItems(
+                    id="filter-quality",
+                    options=[
+                        {"label": "Clean only", "value": "clean"},
+                        {"label": "All messages", "value": "all"},
+                        {"label": "Noise only", "value": "noise"},
+                    ],
+                    value="clean",
+                    className="mb-3",
+                ),
+
+                # Resolved senders toggle
+                dbc.Switch(
+                    id="filter-resolved",
+                    label="Use resolved senders",
+                    value=True,
+                    className="mb-3",
+                ),
+
+                # Date range picker
+                html.Label("Date Range", className="fw-bold mb-1"),
+                dcc.DatePickerRange(
+                    id="filter-dates",
+                    min_date_allowed=DATE_MIN,
+                    max_date_allowed=DATE_MAX,
+                    start_date=DATE_MIN,
+                    end_date=DATE_MAX,
+                    display_format="YYYY-MM-DD",
+                    className="mb-3",
+                    style={"fontSize": "12px"},
+                ),
+
+                html.Hr(),
+
+                # Summary stats card
+                html.Div(id="summary-stats"),
+            ],
+            style={"overflowY": "auto", "maxHeight": "85vh"},
+        ),
+    ],
+    className="shadow-sm",
+    style={"height": "100vh"},
+)
+
+
+# ── Main content (tabs) ─────────────────────────────────────────────────────
+
+main_content = dbc.Tabs(
+    id="main-tabs",
+    active_tab="tab-overview",
+    children=[
+        dbc.Tab(label="Overview", tab_id="tab-overview", children=[
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-msgs-per-chat"), md=6),
+                dbc.Col(dcc.Graph(id="chart-type-donut"), md=6),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-heatmap"), md=6),
+                dbc.Col(dcc.Graph(id="chart-sender-chat"), md=6),
+            ]),
+        ]),
+        dbc.Tab(label="Timeline", tab_id="tab-timeline", children=[
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-timeline"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-kde"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-line-hourly"), md=12),
+            ]),
+        ]),
+        dbc.Tab(label="Senders", tab_id="tab-senders", children=[
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-msgs-per-sender"), md=6),
+                dbc.Col(dcc.Graph(id="chart-gap-box"), md=6),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-content-len"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-scatter-len-hour"), md=12),
+            ]),
+        ]),
+        dbc.Tab(label="Data Quality", tab_id="tab-quality", children=[
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-quality"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(html.Div(id="data-table-container"), md=12),
+            ], className="mt-3"),
+        ]),
+        dbc.Tab(label="Efficiency", tab_id="tab-efficiency", children=[
+            dbc.Row([
+                dbc.Col(html.Div(id="efficiency-report-card"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-first-report"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-report-window-box"), md=6),
+                dbc.Col(dcc.Graph(id="chart-daily-count-trend"), md=6),
+            ]),
+        ]),
+        dbc.Tab(label="Crew Metrics", tab_id="tab-crew", children=[
+            dbc.Row([
+                dbc.Col(html.Div(id="crew-scorecard-container"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-sites-per-hour"), md=6),
+                dbc.Col(dcc.Graph(id="chart-transition-time"), md=6),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-route-timeline"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-pace-consistency"), md=6),
+                dbc.Col(dcc.Graph(id="chart-top-locations"), md=6),
+            ]),
+        ]),
+    ],
+)
+
+
+# ── App layout ───────────────────────────────────────────────────────────────
+
+app.layout = dbc.Container(
+    [
+        dbc.Row(
+            [
+                dbc.Col(sidebar, md=3, className="pe-0"),
+                dbc.Col(main_content, md=9, className="ps-3"),
+            ],
+            className="g-0",
+        ),
+    ],
+    fluid=True,
+    className="p-2",
+)
+
+
+# ── Shared filter inputs ─────────────────────────────────────────────────────
+
+FILTER_INPUTS = [
+    Input("filter-chats", "value"),
+    Input("filter-senders", "value"),
+    Input("filter-quality", "value"),
+    Input("filter-types", "value"),
+    Input("filter-time", "value"),
+    Input("filter-resolved", "value"),
+    Input("filter-dates", "start_date"),
+    Input("filter-dates", "end_date"),
+]
+
+
+def _apply_quality_filter(quality):
+    """Convert quality radio selection to list of noise_types."""
+    if quality == "clean":
+        return ["clean"]
+    elif quality == "noise":
+        return [n for n in NOISE_TYPES if n != "clean"]
+    else:  # "all"
+        return NOISE_TYPES
+
+
+def _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+            date_start=None, date_end=None):
+    """Convenience wrapper that translates quality radio to noise_types."""
+    noise_types = _apply_quality_filter(quality)
+    return get_filtered_df(chats, senders, noise_types, msg_types,
+                           time_range, use_resolved, date_start, date_end)
+
+
+def _sender_col(use_resolved):
+    return "sender_resolved" if use_resolved else "sender"
+
+
+# ── Callback: Summary stats ─────────────────────────────────────────────────
+
+@app.callback(
+    Output("summary-stats", "children"),
+    FILTER_INPUTS,
+)
+def update_summary(chats, senders, quality, msg_types, time_range,
+                   use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    n_clean = len(df[df["noise_type"] == "clean"])
+    n_noise = len(df[df["noise_type"] != "clean"])
+    n_senders = df[df[scol] != ""][scol].nunique()
+    n_chats = df["chat"].nunique()
+
+    # Compute average interval per person
+    df_timed = df[(df[scol] != "") & df["time"].notna()]
+    gap_parts = []
+    for sender, grp in df_timed.groupby(scol):
+        times = grp["time"].sort_values()
+        if len(times) >= 2:
+            diffs = times.diff().dropna().dt.total_seconds() / 60.0
+            gap_parts.append(diffs.mean())
+    avg_gap = f"{np.mean(gap_parts):.1f} min" if gap_parts else "N/A"
+
+    # Compute efficiency metrics
+    ds = _build_daily_summary(df, scol)
+    if not ds.empty:
+        avg_first = ds["first_hour"].mean()
+        avg_first_h = int(avg_first)
+        avg_first_m = int((avg_first - avg_first_h) * 60)
+        period = "AM" if avg_first_h < 12 else "PM"
+        disp_h = avg_first_h % 12 or 12
+        avg_first_str = f"{disp_h}:{avg_first_m:02d} {period}"
+        avg_window = f"{ds['window_hrs'].mean():.1f} hrs"
+    else:
+        avg_first_str = "N/A"
+        avg_window = "N/A"
+
+    return dbc.Card(
+        dbc.CardBody([
+            html.H6("Summary", className="card-title"),
+            html.P(f"Total: {len(df)}", className="mb-1"),
+            html.P(f"Clean: {n_clean}", className="mb-1 text-success"),
+            html.P(f"Noise: {n_noise}", className="mb-1 text-danger"),
+            html.P(f"Senders: {n_senders}", className="mb-1"),
+            html.P(f"Chats: {n_chats}", className="mb-1"),
+            html.P(f"Avg interval: {avg_gap}", className="mb-1 text-info"),
+            html.Hr(),
+            html.H6("Efficiency", className="card-title"),
+            html.P(f"Avg first report: {avg_first_str}", className="mb-1"),
+            html.P(f"Avg report window: {avg_window}", className="mb-0"),
+        ]),
+        color="light",
+    )
+
+
+# ── Chart 1: Messages per Chat ──────────────────────────────────────────────
+
+@app.callback(Output("chart-msgs-per-chat", "figure"), FILTER_INPUTS)
+def chart_msgs_per_chat(chats, senders, quality, msg_types, time_range,
+                        use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[df[scol] != ""]
+    if df_valid.empty:
+        return _empty_fig("Messages per Chat")
+
+    counts = (df_valid.groupby(["chat", scol])
+              .size().reset_index(name="count"))
+    # Totals per chat for labels
+    totals = counts.groupby("chat")["count"].sum().reset_index()
+    totals.columns = ["chat", "total"]
+    fig = px.bar(
+        counts, y="chat", x="count", color=scol,
+        orientation="h", text="count",
+        title="Messages per Chat",
+        labels={"count": "Messages", "chat": "Chat Group", scol: "Sender"},
+    )
+    fig.update_traces(textposition="inside", textfont_size=10)
+    # Add total annotations on the right
+    for _, row in totals.iterrows():
+        fig.add_annotation(
+            x=row["total"], y=row["chat"],
+            text=f"  {int(row['total'])}",
+            showarrow=False, font=dict(size=11, color="#2c3e50"),
+            xanchor="left",
+        )
+    fig.update_layout(
+        barmode="stack",
+        yaxis={"categoryorder": "total ascending"},
+        margin=dict(l=10, r=40, t=40, b=10),
+        legend=dict(font=dict(size=10)),
+        height=400,
+    )
+    return fig
+
+
+# ── Chart 2: Type Distribution (donut) ──────────────────────────────────────
+
+@app.callback(Output("chart-type-donut", "figure"), FILTER_INPUTS)
+def chart_type_donut(chats, senders, quality, msg_types, time_range,
+                     use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    if df.empty:
+        return _empty_fig("Message Type Distribution")
+
+    counts = df["type"].value_counts().reset_index()
+    counts.columns = ["type", "count"]
+    fig = px.pie(
+        counts, names="type", values="count", hole=0.4,
+        title="Message Type Distribution",
+    )
+    fig.update_traces(textinfo="label+value+percent", textfont_size=12)
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+    )
+    return fig
+
+
+# ── Chart 3: Hourly Heatmap (sender × hour) ─────────────────────────────────
+
+@app.callback(Output("chart-heatmap", "figure"), FILTER_INPUTS)
+def chart_heatmap(chats, senders, quality, msg_types, time_range,
+                  use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[(df[scol] != "") & df["hour_int"].notna()]
+    if df_valid.empty:
+        return _empty_fig("Hourly Activity Heatmap")
+
+    df_valid = df_valid.copy()
+    df_valid["hour_int"] = df_valid["hour_int"].astype(int)
+    ct = pd.crosstab(df_valid[scol], df_valid["hour_int"])
+    # Ensure all 24 hours
+    for h in range(24):
+        if h not in ct.columns:
+            ct[h] = 0
+    ct = ct[sorted(ct.columns)]
+    hour_labels = [f"{h % 12 or 12}{'a' if h < 12 else 'p'}" for h in range(24)]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=ct.values,
+        x=hour_labels,
+        y=ct.index.tolist(),
+        colorscale="YlOrRd",
+        text=ct.values,
+        texttemplate="%{text}",
+        hovertemplate="Sender: %{y}<br>Hour: %{x}<br>Messages: %{z}<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Hourly Activity Heatmap",
+        xaxis_title="Hour of Day",
+        yaxis_title="Sender",
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+    )
+    return fig
+
+
+# ── Chart 4: Sender × Chat Matrix (bubble) ──────────────────────────────────
+
+@app.callback(Output("chart-sender-chat", "figure"), FILTER_INPUTS)
+def chart_sender_chat(chats, senders, quality, msg_types, time_range,
+                      use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[df[scol] != ""]
+    if df_valid.empty:
+        return _empty_fig("Sender × Chat Participation")
+
+    counts = (df_valid.groupby([scol, "chat"])
+              .size().reset_index(name="count"))
+    fig = px.scatter(
+        counts, x="chat", y=scol, size="count", color="count",
+        text="count",
+        title="Sender × Chat Participation",
+        labels={"count": "Messages", "chat": "Chat", scol: "Sender"},
+        size_max=40,
+        color_continuous_scale="Blues",
+    )
+    fig.update_traces(textposition="top center", textfont_size=10)
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        xaxis_tickangle=-30,
+    )
+    return fig
+
+
+# ── Chart 5: Activity Timeline ──────────────────────────────────────────────
+
+@app.callback(Output("chart-timeline", "figure"), FILTER_INPUTS)
+def chart_timeline(chats, senders, quality, msg_types, time_range,
+                   use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[(df[scol] != "") & df["time"].notna()].copy()
+    if df_valid.empty:
+        return _empty_fig("Activity Timeline")
+
+    fig = px.scatter(
+        df_valid, x="time", y=scol, color="chat",
+        hover_data=["content", "type", "noise_type"],
+        title="Activity Timeline",
+        labels={"time": "Time", scol: "Sender", "chat": "Chat"},
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=450,
+        xaxis_tickformat="%I:%M %p",
+        legend=dict(font=dict(size=10)),
+    )
+    fig.update_traces(marker=dict(size=10, opacity=0.7))
+    return fig
+
+
+# ── Chart 6: KDE Density ────────────────────────────────────────────────────
+
+@app.callback(Output("chart-kde", "figure"), FILTER_INPUTS)
+def chart_kde(chats, senders, quality, msg_types, time_range, use_resolved,
+              date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[(df[scol] != "") & df["hour"].notna()]
+    if df_valid.empty:
+        return _empty_fig("Message Density by Sender")
+
+    fig = go.Figure()
+    sender_list = sorted(df_valid[scol].unique())
+    colors = px.colors.qualitative.Plotly
+    for i, sender in enumerate(sender_list):
+        hours = df_valid[df_valid[scol] == sender]["hour"].values
+        if len(hours) < 2:
+            continue
+        # Compute KDE using numpy histogram for smoothing
+        hist, bin_edges = np.histogram(hours, bins=48, range=(0, 24),
+                                       density=True)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        # Simple moving average smoothing
+        kernel_size = 3
+        smoothed = np.convolve(hist, np.ones(kernel_size) / kernel_size,
+                               mode="same")
+        color = colors[i % len(colors)]
+        fig.add_trace(go.Scatter(
+            x=bin_centers, y=smoothed,
+            mode="lines", name=sender,
+            fill="tozeroy", opacity=0.4,
+            line=dict(color=color, width=2),
+        ))
+
+    fig.update_layout(
+        title="Message Density by Sender (KDE-style)",
+        xaxis_title="Hour of Day",
+        yaxis_title="Density",
+        xaxis=dict(range=[0, 24], dtick=2,
+                   ticktext=[f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}"
+                             for h in range(0, 25, 2)],
+                   tickvals=list(range(0, 25, 2))),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Chart 6b: Hourly Message Count (line) ───────────────────────────────────
+
+@app.callback(Output("chart-line-hourly", "figure"), FILTER_INPUTS)
+def chart_line_hourly(chats, senders, quality, msg_types, time_range,
+                      use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[(df[scol] != "") & df["hour_int"].notna()].copy()
+    if df_valid.empty:
+        return _empty_fig("Messages per Hour (Line)")
+
+    df_valid["hour_int"] = df_valid["hour_int"].astype(int)
+    counts = (df_valid.groupby([scol, "hour_int"])
+              .size().reset_index(name="count"))
+    # Fill missing hours with 0 then compute cumulative sum per sender
+    sender_list = counts[scol].unique()
+    full_index = pd.MultiIndex.from_product(
+        [sender_list, range(24)], names=[scol, "hour_int"])
+    counts = (counts.set_index([scol, "hour_int"])
+              .reindex(full_index, fill_value=0)
+              .reset_index())
+    counts = counts.sort_values([scol, "hour_int"])
+    counts["cumulative"] = counts.groupby(scol)["count"].cumsum()
+
+    hour_labels = [f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)]
+
+    fig = px.line(
+        counts, x="hour_int", y="cumulative", color=scol,
+        markers=True,
+        title="Cumulative Messages by Hour per Sender",
+        labels={"hour_int": "Hour of Day", "cumulative": "Cumulative Messages", scol: "Sender"},
+    )
+    fig.update_layout(
+        xaxis=dict(
+            tickmode="array",
+            tickvals=list(range(0, 24, 2)),
+            ticktext=[hour_labels[h] for h in range(0, 24, 2)],
+        ),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Chart 9b: Content Length vs Hour (scatter) ───────────────────────────────
+
+@app.callback(Output("chart-scatter-len-hour", "figure"), FILTER_INPUTS)
+def chart_scatter_len_hour(chats, senders, quality, msg_types, time_range,
+                           use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[(df[scol] != "") & df["hour"].notna() &
+                  (df["content_len"] > 0)].copy()
+    if df_valid.empty:
+        return _empty_fig("Content Length vs Hour (Scatter)")
+
+    fig = px.scatter(
+        df_valid, x="hour", y="content_len", color=scol,
+        opacity=0.6,
+        hover_data=["chat", "type", "content"],
+        title="Content Length vs Hour of Day",
+        labels={"hour": "Hour of Day", "content_len": "Message Length (chars)",
+                scol: "Sender"},
+    )
+    fig.update_layout(
+        xaxis=dict(range=[0, 24], dtick=2,
+                   ticktext=[f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}"
+                             for h in range(0, 25, 2)],
+                   tickvals=list(range(0, 25, 2))),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=450,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Chart 7: Messages per Sender ────────────────────────────────────────────
+
+@app.callback(Output("chart-msgs-per-sender", "figure"), FILTER_INPUTS)
+def chart_msgs_per_sender(chats, senders, quality, msg_types, time_range,
+                          use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[df[scol] != ""]
+    if df_valid.empty:
+        return _empty_fig("Messages per Sender")
+
+    # Count + average interval per sender
+    counts = df_valid[scol].value_counts().reset_index()
+    counts.columns = ["sender", "count"]
+    df_timed = df_valid[df_valid["time"].notna()]
+    avg_gaps = {}
+    for sender, grp in df_timed.groupby(scol):
+        times = grp["time"].sort_values()
+        if len(times) >= 2:
+            avg_gaps[sender] = times.diff().dropna().dt.total_seconds().mean() / 60.0
+    counts["avg_gap"] = counts["sender"].map(avg_gaps)
+    counts["label"] = counts.apply(
+        lambda r: f"{r['count']}  (avg {r['avg_gap']:.0f}m)"
+        if pd.notna(r["avg_gap"]) else str(r["count"]),
+        axis=1)
+
+    fig = px.bar(
+        counts, y="sender", x="count", orientation="h",
+        text="label",
+        title="Messages per Sender (count + avg interval)",
+        labels={"count": "Messages", "sender": "Sender"},
+        color="count",
+        color_continuous_scale="Viridis",
+    )
+    fig.update_traces(textposition="outside", textfont_size=10)
+    fig.update_layout(
+        yaxis={"categoryorder": "total ascending"},
+        margin=dict(l=10, r=80, t=40, b=10),
+        height=400,
+    )
+    return fig
+
+
+# ── Chart 8: Message Gap Analysis (box plot) ────────────────────────────────
+
+@app.callback(Output("chart-gap-box", "figure"), FILTER_INPUTS)
+def chart_gap_box(chats, senders, quality, msg_types, time_range,
+                  use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[(df[scol] != "") & df["time"].notna()].copy()
+    if df_valid.empty:
+        return _empty_fig("Message Gap Analysis")
+
+    # Compute gaps per sender
+    gap_rows = []
+    for sender, grp in df_valid.groupby(scol):
+        times = grp["time"].sort_values()
+        if len(times) < 2:
+            continue
+        diffs = times.diff().dropna().dt.total_seconds() / 60.0  # minutes
+        for gap in diffs:
+            gap_rows.append({"sender": sender, "gap_min": gap})
+
+    if not gap_rows:
+        return _empty_fig("Message Gap Analysis")
+
+    df_gaps = pd.DataFrame(gap_rows)
+    fig = px.box(
+        df_gaps, x="sender", y="gap_min", points="all",
+        title="Message Gap Analysis (minutes between messages)",
+        labels={"gap_min": "Gap (minutes)", "sender": "Sender"},
+    )
+    # Add mean annotation per sender
+    means = df_gaps.groupby("sender")["gap_min"].mean()
+    for sender, avg in means.items():
+        fig.add_annotation(
+            x=sender, y=avg,
+            text=f"avg {avg:.0f}m",
+            showarrow=True, arrowhead=2, arrowcolor="#e74c3c",
+            font=dict(size=10, color="#e74c3c"),
+            ax=30, ay=-20,
+        )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        xaxis_tickangle=-30,
+    )
+    return fig
+
+
+# ── Chart 9: Content Length Distribution ─────────────────────────────────────
+
+@app.callback(Output("chart-content-len", "figure"), FILTER_INPUTS)
+def chart_content_len(chats, senders, quality, msg_types, time_range,
+                      use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    df_valid = df[df[scol] != ""].copy()
+    if df_valid.empty:
+        return _empty_fig("Content Length Distribution")
+
+    fig = px.histogram(
+        df_valid, x="content_len", color=scol,
+        marginal="box",
+        title="Content Length Distribution",
+        labels={"content_len": "Content Length (chars)", scol: "Sender"},
+        nbins=30,
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Chart 10: Data Quality Overview (always shows all data) ─────────────────
+
+@app.callback(
+    Output("chart-quality", "figure"),
+    [Input("filter-chats", "value"),
+     Input("filter-dates", "start_date"),
+     Input("filter-dates", "end_date")],
+)
+def chart_quality(chats, date_start, date_end):
+    df = DF_ALL.copy()
+    if date_start:
+        df = df[df["msg_date"] >= pd.Timestamp(date_start)]
+    if date_end:
+        df = df[df["msg_date"] <= pd.Timestamp(date_end)]
+    if chats:
+        df = df[df["chat"].isin(chats)]
+    if df.empty:
+        return _empty_fig("Data Quality Overview")
+
+    counts = (df.groupby(["chat", "noise_type"])
+              .size().reset_index(name="count"))
+
+    color_map = {
+        "clean": "#2ecc71",
+        "css_html": "#e74c3c",
+        "load_error": "#e67e22",
+        "system_metadata": "#9b59b6",
+        "empty_sender_caption": "#3498db",
+    }
+
+    fig = px.bar(
+        counts, x="chat", y="count", color="noise_type",
+        text="count",
+        title="Data Quality Overview (noise types per chat)",
+        labels={"count": "Messages", "chat": "Chat", "noise_type": "Noise Type"},
+        color_discrete_map=color_map,
+        barmode="stack",
+    )
+    fig.update_traces(textposition="inside", textfont_size=10)
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        xaxis_tickangle=-30,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Data Table ───────────────────────────────────────────────────────────────
+
+@app.callback(Output("data-table-container", "children"), FILTER_INPUTS)
+def update_data_table(chats, senders, quality, msg_types, time_range,
+                      use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+
+    # Select columns for display
+    display_cols = ["chat", scol, "timestamp", "type", "noise_type",
+                    "content_len", "content"]
+    df_display = df[display_cols].copy()
+    df_display.columns = ["Chat", "Sender", "Time", "Type", "Noise",
+                          "Length", "Content"]
+    # Truncate content for display
+    df_display["Content"] = df_display["Content"].str[:120]
+
+    table = dash_table.DataTable(
+        data=df_display.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in df_display.columns],
+        filter_action="native",
+        sort_action="native",
+        sort_mode="multi",
+        page_size=20,
+        style_table={"overflowX": "auto"},
+        style_cell={
+            "textAlign": "left",
+            "padding": "8px",
+            "fontSize": "13px",
+            "maxWidth": "300px",
+            "overflow": "hidden",
+            "textOverflow": "ellipsis",
+        },
+        style_header={
+            "backgroundColor": "#2c3e50",
+            "color": "white",
+            "fontWeight": "bold",
+        },
+        style_data_conditional=[
+            {
+                "if": {
+                    "filter_query": "{Noise} != 'clean'",
+                },
+                "backgroundColor": "#fde8e8",
+                "color": "#c0392b",
+            },
+            {
+                "if": {
+                    "filter_query": "{Noise} = 'clean'",
+                },
+                "backgroundColor": "#eafaf1",
+            },
+        ],
+    )
+    return table
+
+
+# ── Efficiency: helper to build daily summary per sender ─────────────────────
+
+def _build_daily_summary(df, scol):
+    """Return a DataFrame with one row per (sender, date) with efficiency stats."""
+    df_valid = df[(df[scol] != "") & df["time"].notna() & df["msg_date"].notna()].copy()
+    if df_valid.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for (sender, d), grp in df_valid.groupby([scol, df_valid["msg_date"].dt.date]):
+        times = grp["time"].sort_values()
+        first = times.iloc[0]
+        last = times.iloc[-1]
+        window_hrs = (last - first).total_seconds() / 3600.0
+        n = len(times)
+        avg_gap = (times.diff().dropna().dt.total_seconds().mean() / 60.0
+                   if n >= 2 else 0.0)
+        rows.append({
+            "sender": sender,
+            "date": d,
+            "first_time": first,
+            "last_time": last,
+            "first_hour": first.hour + first.minute / 60.0,
+            "last_hour": last.hour + last.minute / 60.0,
+            "window_hrs": window_hrs,
+            "msg_count": n,
+            "avg_gap_min": avg_gap,
+        })
+    return pd.DataFrame(rows)
+
+
+# ── Crew Metrics: site visit analysis ─────────────────────────────────────────
+
+def _build_site_visits(df, scol):
+    """Build a DataFrame of site visits from messages with locations.
+
+    Walks messages sorted by (sender, date, time). A new location or a new
+    calendar date = new site visit.  Messages without a location inherit the
+    current site.
+
+    Returns DataFrame: sender, date, location, start_time, end_time,
+                       duration_min, msg_count, visit_order
+    """
+    df_valid = df[
+        (df[scol] != "") & df["time"].notna() & df["msg_date"].notna()
+    ].copy()
+    if df_valid.empty:
+        return pd.DataFrame()
+
+    df_valid = df_valid.sort_values([scol, "msg_date", "time"])
+
+    def _flush(visits, sender, current_loc, visit_start, visit_end,
+               visit_msgs, visit_date, visit_order):
+        if current_loc and visit_start is not None:
+            dur = (visit_end - visit_start).total_seconds() / 60.0
+            visits.append({
+                "sender": sender,
+                "date": visit_date,
+                "location": current_loc,
+                "start_time": visit_start,
+                "end_time": visit_end,
+                "duration_min": max(dur, 1.0),
+                "msg_count": visit_msgs,
+                "visit_order": visit_order,
+            })
+
+    visits = []
+    for sender, grp in df_valid.groupby(scol):
+        current_loc = ""
+        visit_start = None
+        visit_end = None
+        visit_msgs = 0
+        visit_date = None
+        visit_order = 0
+        current_day = None
+
+        for _, row in grp.iterrows():
+            loc = row["location"]
+            t = row["time"]
+            d = row["msg_date"]
+            row_day = d.date() if hasattr(d, "date") else d
+
+            # Reset on date change
+            if current_day is not None and row_day != current_day:
+                _flush(visits, sender, current_loc, visit_start, visit_end,
+                       visit_msgs, visit_date, visit_order)
+                current_loc = ""
+                visit_start = None
+                visit_end = None
+                visit_msgs = 0
+                visit_order = 0
+
+            current_day = row_day
+
+            if loc and loc != current_loc:
+                # Save previous visit if any
+                _flush(visits, sender, current_loc, visit_start, visit_end,
+                       visit_msgs, visit_date, visit_order)
+                # Start new visit
+                current_loc = loc
+                visit_start = t
+                visit_end = t
+                visit_msgs = 1
+                visit_date = d
+                visit_order += 1
+            elif current_loc:
+                # Continue current visit
+                visit_end = t
+                visit_msgs += 1
+
+        # Save last visit
+        _flush(visits, sender, current_loc, visit_start, visit_end,
+               visit_msgs, visit_date, visit_order)
+
+    return pd.DataFrame(visits)
+
+
+def _build_transitions(visits_df):
+    """Compute transition times between consecutive site visits per sender.
+
+    Returns DataFrame: sender, date, from_location, to_location, transition_min
+    """
+    if visits_df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for sender, grp in visits_df.groupby("sender"):
+        grp_sorted = grp.sort_values(["date", "start_time"])
+        prev = None
+        for _, row in grp_sorted.iterrows():
+            if prev is not None:
+                gap = (row["start_time"] - prev["end_time"]).total_seconds() / 60.0
+                # Only count transitions within same day and reasonable gap
+                if gap >= 0 and gap < 480:  # max 8 hours
+                    rows.append({
+                        "sender": sender,
+                        "date": row["date"],
+                        "from_location": prev["location"],
+                        "to_location": row["location"],
+                        "transition_min": gap,
+                    })
+            prev = row
+
+    return pd.DataFrame(rows)
+
+
+_WORK_BLOCK_GAP_MIN = 120  # gaps > 2 h split into separate work blocks
+
+
+def _compute_active_hours(day_visits):
+    """Sum work-block durations for one sender-day.
+
+    Consecutive site visits with gaps < _WORK_BLOCK_GAP_MIN are grouped into
+    a work block.  Off-duty gaps (> threshold) start a new block.
+    """
+    vs = day_visits.sort_values("start_time")
+    total_sec = 0.0
+    block_start = vs.iloc[0]["start_time"]
+    block_end = vs.iloc[0]["end_time"]
+
+    for i in range(1, len(vs)):
+        row = vs.iloc[i]
+        gap = (row["start_time"] - block_end).total_seconds() / 60.0
+        if gap < _WORK_BLOCK_GAP_MIN:
+            # Extend current work block
+            block_end = max(block_end, row["end_time"])
+        else:
+            # Flush current block, start new one
+            total_sec += (block_end - block_start).total_seconds()
+            block_start = row["start_time"]
+            block_end = row["end_time"]
+
+    # Flush last block
+    total_sec += (block_end - block_start).total_seconds()
+    return max(total_sec / 3600.0, 1 / 60.0)  # at least 1 minute
+
+
+def _build_crew_scorecard(visits_df, ds_df):
+    """Aggregate crew efficiency metrics per sender.
+
+    Active hours are the sum of work-block durations per day: consecutive
+    site visits with gaps under 2 h are grouped into a work block; longer
+    off-duty gaps are excluded.
+
+    Returns DataFrame: sender, days_active, total_sites, avg_sites_per_day,
+                       avg_sites_per_hour, avg_transition_min, total_active_hrs
+    """
+    if visits_df.empty:
+        return pd.DataFrame()
+
+    trans_df = _build_transitions(visits_df)
+
+    rows = []
+    for sender, grp in visits_df.groupby("sender"):
+        total_sites = len(grp)
+        days_active = grp["date"].nunique()
+        avg_sites_day = total_sites / days_active if days_active else 0
+
+        # Active hours = sum of work-block spans per day
+        total_hrs = 0.0
+        for _d, day_grp in grp.groupby(grp["date"].dt.date):
+            total_hrs += _compute_active_hours(day_grp)
+
+        avg_sites_hr = total_sites / total_hrs if total_hrs > 0 else 0
+
+        # Average transition time
+        if not trans_df.empty and sender in trans_df["sender"].values:
+            avg_trans = trans_df[trans_df["sender"] == sender]["transition_min"].mean()
+        else:
+            avg_trans = 0.0
+
+        rows.append({
+            "sender": sender,
+            "days_active": days_active,
+            "total_sites": total_sites,
+            "avg_sites_per_day": round(avg_sites_day, 1),
+            "avg_sites_per_hour": round(avg_sites_hr, 1),
+            "avg_transition_min": round(avg_trans, 1),
+            "total_active_hrs": round(total_hrs, 1),
+        })
+
+    return pd.DataFrame(rows).sort_values("total_sites", ascending=False)
+
+
+# ── Efficiency Chart 1: Daily Report Card (table) ───────────────────────────
+
+@app.callback(Output("efficiency-report-card", "children"), FILTER_INPUTS)
+def efficiency_report_card(chats, senders, quality, msg_types, time_range,
+                           use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    ds = _build_daily_summary(df, scol)
+    if ds.empty:
+        return html.P("No data for current filters", className="text-muted p-3")
+
+    ds_display = ds.copy()
+    ds_display["first_time"] = ds_display["first_time"].dt.strftime("%I:%M %p")
+    ds_display["last_time"] = ds_display["last_time"].dt.strftime("%I:%M %p")
+    ds_display["window_hrs"] = ds_display["window_hrs"].round(1)
+    ds_display["avg_gap_min"] = ds_display["avg_gap_min"].round(1)
+    ds_display["date"] = ds_display["date"].astype(str)
+    ds_display = ds_display[["sender", "date", "first_time", "last_time",
+                              "window_hrs", "msg_count", "avg_gap_min"]]
+    ds_display.columns = ["Sender", "Date", "First Msg", "Last Msg",
+                           "Window (hrs)", "Messages", "Avg Gap (min)"]
+
+    table = dash_table.DataTable(
+        data=ds_display.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in ds_display.columns],
+        filter_action="native",
+        sort_action="native",
+        sort_mode="multi",
+        page_size=20,
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+        style_header={
+            "backgroundColor": "#2c3e50", "color": "white", "fontWeight": "bold",
+        },
+        style_data_conditional=[
+            {"if": {"filter_query": "{Window (hrs)} < 1"},
+             "backgroundColor": "#fde8e8", "color": "#c0392b"},
+            {"if": {"filter_query": "{Window (hrs)} >= 4"},
+             "backgroundColor": "#eafaf1"},
+        ],
+    )
+    return html.Div([
+        html.H5("Daily Report Card", className="mb-2"),
+        table,
+    ])
+
+
+# ── Efficiency Chart 2: First Report Time scatter ───────────────────────────
+
+@app.callback(Output("chart-first-report", "figure"), FILTER_INPUTS)
+def chart_first_report(chats, senders, quality, msg_types, time_range,
+                       use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    ds = _build_daily_summary(df, scol)
+    if ds.empty:
+        return _empty_fig("First Report Time by Sender")
+
+    ds["date_str"] = ds["date"].astype(str)
+    fig = px.scatter(
+        ds, x="date_str", y="first_hour", color="sender",
+        size="msg_count",
+        hover_data={"first_hour": False, "date_str": False,
+                    "first_time": True, "msg_count": True, "window_hrs": ":.1f"},
+        title="First Report Time by Sender (per day)",
+        labels={"date_str": "Date", "first_hour": "First Message (hour)",
+                "sender": "Sender"},
+        size_max=18,
+    )
+    fig.update_layout(
+        yaxis=dict(
+            range=[24, 0], dtick=2,
+            ticktext=[f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}"
+                      for h in range(0, 25, 2)],
+            tickvals=list(range(0, 25, 2)),
+        ),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=420,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Efficiency Chart 3: Reporting Window box plot ────────────────────────────
+
+@app.callback(Output("chart-report-window-box", "figure"), FILTER_INPUTS)
+def chart_report_window_box(chats, senders, quality, msg_types, time_range,
+                            use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    ds = _build_daily_summary(df, scol)
+    if ds.empty:
+        return _empty_fig("Reporting Window by Sender")
+
+    fig = px.box(
+        ds, x="sender", y="window_hrs", points="all",
+        title="Reporting Window by Sender (hours)",
+        labels={"window_hrs": "Window (hours)", "sender": "Sender"},
+        color="sender",
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        xaxis_tickangle=-30,
+        showlegend=False,
+    )
+    return fig
+
+
+# ── Efficiency Chart 4: Daily Message Count Trend ────────────────────────────
+
+@app.callback(Output("chart-daily-count-trend", "figure"), FILTER_INPUTS)
+def chart_daily_count_trend(chats, senders, quality, msg_types, time_range,
+                            use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    ds = _build_daily_summary(df, scol)
+    if ds.empty:
+        return _empty_fig("Daily Message Count Trend")
+
+    ds["date_str"] = ds["date"].astype(str)
+    fig = px.line(
+        ds.sort_values("date"), x="date_str", y="msg_count",
+        color="sender", markers=True,
+        title="Daily Message Count per Sender",
+        labels={"date_str": "Date", "msg_count": "Messages", "sender": "Sender"},
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+# ── Crew Metrics Callback 1: Crew Scorecard Table ────────────────────────────
+
+@app.callback(Output("crew-scorecard-container", "children"), FILTER_INPUTS)
+def crew_scorecard(chats, senders, quality, msg_types, time_range,
+                   use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    visits_df = _build_site_visits(df, scol)
+    if visits_df.empty:
+        return html.P("No site visit data for current filters",
+                       className="text-muted p-3")
+
+    ds = _build_daily_summary(df, scol)
+    sc = _build_crew_scorecard(visits_df, ds)
+    if sc.empty:
+        return html.P("No crew scorecard data", className="text-muted p-3")
+
+    sc_display = sc.rename(columns={
+        "sender": "Sender",
+        "days_active": "Days Active",
+        "total_sites": "Total Sites",
+        "avg_sites_per_day": "Sites/Day",
+        "avg_sites_per_hour": "Sites/Hour",
+        "avg_transition_min": "Avg Transition (min)",
+        "total_active_hrs": "Active Hours",
+    })
+
+    table = dash_table.DataTable(
+        data=sc_display.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in sc_display.columns],
+        sort_action="native",
+        sort_mode="multi",
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+        style_header={
+            "backgroundColor": "#2c3e50", "color": "white", "fontWeight": "bold",
+        },
+        style_data_conditional=[
+            {"if": {"filter_query": "{Sites/Hour} >= 3"},
+             "backgroundColor": "#eafaf1"},
+            {"if": {"filter_query": "{Sites/Hour} < 1"},
+             "backgroundColor": "#fde8e8", "color": "#c0392b"},
+        ],
+    )
+    return html.Div([
+        html.H5("Crew Scorecard", className="mb-2"),
+        table,
+    ])
+
+
+# ── Crew Metrics Callback 2: Sites per Hour Bar Chart ────────────────────────
+
+@app.callback(Output("chart-sites-per-hour", "figure"), FILTER_INPUTS)
+def chart_sites_per_hour(chats, senders, quality, msg_types, time_range,
+                         use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    visits_df = _build_site_visits(df, scol)
+    if visits_df.empty:
+        return _empty_fig("Sites per Hour")
+
+    ds = _build_daily_summary(df, scol)
+    sc = _build_crew_scorecard(visits_df, ds)
+    if sc.empty:
+        return _empty_fig("Sites per Hour")
+
+    sc_sorted = sc.sort_values("avg_sites_per_hour")
+    fig = px.bar(
+        sc_sorted, y="sender", x="avg_sites_per_hour", orientation="h",
+        text="avg_sites_per_hour",
+        title="Average Sites per Hour by Crew Member",
+        labels={"avg_sites_per_hour": "Sites / Hour", "sender": "Sender"},
+        color="avg_sites_per_hour",
+        color_continuous_scale="RdYlGn",
+    )
+    fig.update_traces(textposition="outside", textfont_size=11,
+                      texttemplate="%{text:.1f}")
+    fig.update_layout(
+        margin=dict(l=10, r=60, t=40, b=10),
+        height=400,
+        yaxis={"categoryorder": "total ascending"},
+    )
+    return fig
+
+
+# ── Crew Metrics Callback 3: Transition Time Box Plot ────────────────────────
+
+@app.callback(Output("chart-transition-time", "figure"), FILTER_INPUTS)
+def chart_transition_time(chats, senders, quality, msg_types, time_range,
+                          use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    visits_df = _build_site_visits(df, scol)
+    if visits_df.empty:
+        return _empty_fig("Transition Time Between Sites")
+
+    trans_df = _build_transitions(visits_df)
+    if trans_df.empty:
+        return _empty_fig("Transition Time Between Sites")
+
+    fig = px.box(
+        trans_df, x="sender", y="transition_min", points="all",
+        title="Transition Time Between Sites (minutes)",
+        labels={"transition_min": "Transition (min)", "sender": "Sender"},
+        color="sender",
+    )
+    # Add mean annotations
+    means = trans_df.groupby("sender")["transition_min"].mean()
+    for sender, avg in means.items():
+        fig.add_annotation(
+            x=sender, y=avg,
+            text=f"avg {avg:.0f}m",
+            showarrow=True, arrowhead=2, arrowcolor="#e74c3c",
+            font=dict(size=10, color="#e74c3c"),
+            ax=30, ay=-20,
+        )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        xaxis_tickangle=-30,
+        showlegend=False,
+    )
+    return fig
+
+
+# ── Crew Metrics Callback 4: Route Timeline (Gantt-style) ────────────────────
+
+@app.callback(Output("chart-route-timeline", "figure"), FILTER_INPUTS)
+def chart_route_timeline(chats, senders, quality, msg_types, time_range,
+                         use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    visits_df = _build_site_visits(df, scol)
+    if visits_df.empty:
+        return _empty_fig("Route Timeline")
+
+    # Build Gantt-style timeline using px.timeline
+    gantt_data = visits_df.copy()
+    gantt_data["start_str"] = gantt_data["start_time"].dt.strftime("%Y-%m-%d %H:%M")
+    # Ensure end > start for visibility (min 2-minute block)
+    gantt_data["end_adj"] = gantt_data.apply(
+        lambda r: r["end_time"] if (r["end_time"] - r["start_time"]).total_seconds() > 60
+        else r["start_time"] + pd.Timedelta(minutes=2),
+        axis=1,
+    )
+    gantt_data["end_str"] = gantt_data["end_adj"].dt.strftime("%Y-%m-%d %H:%M")
+
+    fig = px.timeline(
+        gantt_data,
+        x_start="start_time",
+        x_end="end_adj",
+        y="sender",
+        color="location",
+        hover_data=["location", "msg_count", "duration_min"],
+        title="Route Timeline (site visits over time)",
+        labels={"sender": "Crew Member"},
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=450,
+        legend=dict(font=dict(size=9), orientation="h", yanchor="bottom",
+                    y=-0.3, xanchor="center", x=0.5),
+        xaxis_tickformat="%I:%M %p",
+    )
+    return fig
+
+
+# ── Crew Metrics Callback 5: Pace Consistency ────────────────────────────────
+
+@app.callback(Output("chart-pace-consistency", "figure"), FILTER_INPUTS)
+def chart_pace_consistency(chats, senders, quality, msg_types, time_range,
+                           use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    visits_df = _build_site_visits(df, scol)
+    if visits_df.empty:
+        return _empty_fig("Pace Consistency")
+
+    # For each sender-day, compute cumulative sites vs hours into shift
+    fig = go.Figure()
+    colors = px.colors.qualitative.Plotly
+    sender_list = sorted(visits_df["sender"].unique())
+
+    for i, sender in enumerate(sender_list):
+        sv = visits_df[visits_df["sender"] == sender].sort_values("start_time")
+        if sv.empty:
+            continue
+
+        # Group by date, compute hours-into-shift and cumulative site count
+        for d, day_visits in sv.groupby("date"):
+            day_sorted = day_visits.sort_values("start_time")
+            shift_start = day_sorted["start_time"].iloc[0]
+            hours_in = []
+            cum_sites = []
+            for j, (_, row) in enumerate(day_sorted.iterrows(), 1):
+                h = (row["start_time"] - shift_start).total_seconds() / 3600.0
+                hours_in.append(h)
+                cum_sites.append(j)
+
+            color = colors[i % len(colors)]
+            date_str = str(d)[:10] if hasattr(d, 'strftime') else str(d)[:10]
+            fig.add_trace(go.Scatter(
+                x=hours_in, y=cum_sites,
+                mode="lines+markers",
+                name=f"{sender} ({date_str})",
+                line=dict(color=color),
+                marker=dict(size=6),
+                legendgroup=sender,
+                showlegend=(d == day_sorted["date"].iloc[0]),
+            ))
+
+    fig.update_layout(
+        title="Pace Consistency (cumulative sites vs hours into shift)",
+        xaxis_title="Hours Into Shift",
+        yaxis_title="Cumulative Sites Visited",
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        legend=dict(font=dict(size=9)),
+    )
+    return fig
+
+
+# ── Crew Metrics Callback 6: Most Visited Locations ──────────────────────────
+
+@app.callback(Output("chart-top-locations", "figure"), FILTER_INPUTS)
+def chart_top_locations(chats, senders, quality, msg_types, time_range,
+                        use_resolved, date_start, date_end):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end)
+    scol = _sender_col(use_resolved)
+    visits_df = _build_site_visits(df, scol)
+    if visits_df.empty:
+        return _empty_fig("Most Visited Locations")
+
+    loc_counts = (visits_df.groupby("location")
+                  .agg(visits=("sender", "size"),
+                       senders=("sender", "nunique"))
+                  .sort_values("visits", ascending=False)
+                  .head(20)
+                  .reset_index())
+
+    fig = px.bar(
+        loc_counts, y="location", x="visits", orientation="h",
+        text="visits",
+        title="Top 20 Most Visited Locations",
+        labels={"visits": "Visit Count", "location": "Location"},
+        color="senders",
+        color_continuous_scale="Blues",
+        hover_data=["senders"],
+    )
+    fig.update_traces(textposition="outside", textfont_size=10)
+    fig.update_layout(
+        yaxis={"categoryorder": "total ascending"},
+        margin=dict(l=10, r=60, t=40, b=10),
+        height=max(400, len(loc_counts) * 25),
+        coloraxis_colorbar_title="Unique<br>Senders",
+    )
+    return fig
+
+
+# ── Helper: empty figure ─────────────────────────────────────────────────────
+
+def _empty_fig(title):
+    fig = go.Figure()
+    fig.add_annotation(
+        text="No data for current filters",
+        xref="paper", yref="paper", x=0.5, y=0.5,
+        showarrow=False, font=dict(size=16, color="gray"),
+    )
+    fig.update_layout(
+        title=title,
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+    )
+    return fig
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
+def print_report():
+    """Print analytic metrics report to terminal."""
+    sep = "─" * 72
+    print(f"\n{'═' * 72}")
+    print("  WhatsApp Chat Dashboard — Data Report")
+    print(f"{'═' * 72}\n")
+
+    # ── Overall stats
+    pct_clean = CLEAN_MSGS / TOTAL_MSGS * 100 if TOTAL_MSGS else 0
+    pct_noise = NOISE_MSGS / TOTAL_MSGS * 100 if TOTAL_MSGS else 0
+    print(f"  Total messages:  {TOTAL_MSGS}")
+    print(f"  Clean:           {CLEAN_MSGS}  ({pct_clean:.1f}%)")
+    print(f"  Noise:           {NOISE_MSGS}  ({pct_noise:.1f}%)")
+    print(f"  Unique chats:    {NUM_CHATS}")
+    print(f"  Unique senders:  {NUM_SENDERS}")
+    print(f"  Message types:   {', '.join(ALL_TYPES)}")
+
+    # ── Noise breakdown
+    print(f"\n{sep}")
+    print("  Noise Breakdown")
+    print(sep)
+    noise_counts = DF_ALL["noise_type"].value_counts()
+    for ntype in sorted(noise_counts.index):
+        cnt = noise_counts[ntype]
+        pct = cnt / TOTAL_MSGS * 100
+        bar = "█" * int(pct / 2) + "░" * (50 - int(pct / 2))
+        print(f"  {ntype:<25s} {cnt:>4d}  ({pct:5.1f}%)  {bar}")
+
+    # ── Per-chat breakdown
+    print(f"\n{sep}")
+    print("  Per-Chat Breakdown")
+    print(sep)
+    print(f"  {'Chat':<35s} {'Total':>5s} {'Clean':>5s} {'Noise':>5s} "
+          f"{'%Clean':>6s}  {'Senders'}")
+    print(f"  {'─' * 35} {'─' * 5} {'─' * 5} {'─' * 5} {'─' * 6}  {'─' * 20}")
+    for chat in ALL_CHATS:
+        sub = DF_ALL[DF_ALL["chat"] == chat]
+        n_total = len(sub)
+        n_clean = len(sub[sub["noise_type"] == "clean"])
+        n_noise = n_total - n_clean
+        pct = n_clean / n_total * 100 if n_total else 0
+        senders_in = sorted(
+            sub[sub["sender_resolved"] != ""]["sender_resolved"].unique())
+        senders_str = ", ".join(senders_in)
+        if len(senders_str) > 20:
+            senders_str = senders_str[:17] + "..."
+        chat_short = chat[:35]
+        print(f"  {chat_short:<35s} {n_total:>5d} {n_clean:>5d} {n_noise:>5d} "
+              f"{pct:>5.1f}%  {senders_str}")
+
+    # ── Per-sender stats (resolved)
+    print(f"\n{sep}")
+    print("  Per-Sender Stats (resolved)")
+    print(sep)
+    df_with_sender = DF_ALL[DF_ALL["sender_resolved"] != ""]
+    sender_stats = (df_with_sender.groupby("sender_resolved")
+                    .agg(total=("noise_type", "size"),
+                         clean=("noise_type", lambda x: (x == "clean").sum()),
+                         chats=("chat", "nunique"),
+                         avg_len=("content_len", "mean"))
+                    .sort_values("total", ascending=False))
+    print(f"  {'Sender':<25s} {'Total':>5s} {'Clean':>5s} {'Chats':>5s} "
+          f"{'Avg Len':>7s}")
+    print(f"  {'─' * 25} {'─' * 5} {'─' * 5} {'─' * 5} {'─' * 7}")
+    for sender, row in sender_stats.iterrows():
+        sender_short = str(sender)[:25]
+        print(f"  {sender_short:<25s} {int(row['total']):>5d} "
+              f"{int(row['clean']):>5d} {int(row['chats']):>5d} "
+              f"{row['avg_len']:>7.1f}")
+
+    # ── Time distribution
+    print(f"\n{sep}")
+    print("  Hourly Distribution (clean messages)")
+    print(sep)
+    df_clean_timed = DF_ALL[
+        (DF_ALL["noise_type"] == "clean") & DF_ALL["hour_int"].notna()].copy()
+    if not df_clean_timed.empty:
+        df_clean_timed["hour_int"] = df_clean_timed["hour_int"].astype(int)
+        hour_counts = df_clean_timed["hour_int"].value_counts().sort_index()
+        max_count = hour_counts.max() if len(hour_counts) else 1
+        for h in range(24):
+            cnt = hour_counts.get(h, 0)
+            bar_len = int(cnt / max_count * 40) if max_count else 0
+            label = f"{h % 12 or 12:>2d} {'AM' if h < 12 else 'PM'}"
+            bar = "█" * bar_len
+            print(f"  {label}  {cnt:>3d}  {bar}")
+
+    # ── De-duplication report
+    print(f"\n{sep}")
+    print("  File De-duplication")
+    print(sep)
+    all_files = _discover_json_files(DATA_DIR)
+    chat_file_count = {}
+    for path in all_files:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if "exportInfo" not in data:
+                continue
+            name = data["exportInfo"]["chatName"]
+            key = _normalize_chat_name(name)
+            chat_file_count.setdefault(key, []).append(
+                os.path.relpath(path, DATA_DIR))
+        except (json.JSONDecodeError, KeyError):
+            continue
+    dupes = {k: v for k, v in chat_file_count.items() if len(v) > 1}
+    if dupes:
+        for name, files in sorted(dupes.items()):
+            print(f"  {name}: {len(files)} files (kept largest)")
+            for fn in files:
+                print(f"    - {fn}")
+    else:
+        print("  No duplicate chat names found.")
+
+    # ── Reporting efficiency
+    print(f"\n{sep}")
+    print("  Reporting Efficiency (per sender per day)")
+    print(sep)
+    ds = _build_daily_summary(DF_ALL[DF_ALL["noise_type"] == "clean"],
+                              "sender_resolved")
+    if not ds.empty:
+        print(f"  {'Sender':<25s} {'Days':>4s} {'Avg 1st':>8s} "
+              f"{'Avg Window':>10s} {'Avg Msgs':>8s}")
+        print(f"  {'─' * 25} {'─' * 4} {'─' * 8} {'─' * 10} {'─' * 8}")
+        for sender, grp in ds.groupby("sender"):
+            n_days = len(grp)
+            avg_first = grp["first_hour"].mean()
+            fh = int(avg_first)
+            fm = int((avg_first - fh) * 60)
+            period = "AM" if fh < 12 else "PM"
+            dh = fh % 12 or 12
+            avg_win = grp["window_hrs"].mean()
+            avg_msgs = grp["msg_count"].mean()
+            sender_short = str(sender)[:25]
+            print(f"  {sender_short:<25s} {n_days:>4d} "
+                  f"{dh:>2d}:{fm:02d} {period} "
+                  f"{avg_win:>9.1f}h {avg_msgs:>8.1f}")
+    else:
+        print("  No daily efficiency data available.")
+
+    # ── Crew Metrics
+    print(f"\n{sep}")
+    print("  Crew Metrics (site visits per sender)")
+    print(sep)
+    df_clean = DF_ALL[DF_ALL["noise_type"] == "clean"]
+    visits_df = _build_site_visits(df_clean, "sender_resolved")
+    if not visits_df.empty:
+        ds_crew = _build_daily_summary(df_clean, "sender_resolved")
+        sc = _build_crew_scorecard(visits_df, ds_crew)
+        if not sc.empty:
+            print(f"  {'Sender':<25s} {'Sites':>5s} {'Sites/Day':>9s} "
+                  f"{'Sites/Hr':>8s} {'Avg Trans':>9s} {'Hrs':>5s}")
+            print(f"  {'─' * 25} {'─' * 5} {'─' * 9} {'─' * 8} "
+                  f"{'─' * 9} {'─' * 5}")
+            for _, row in sc.iterrows():
+                s = str(row["sender"])[:25]
+                print(f"  {s:<25s} {int(row['total_sites']):>5d} "
+                      f"{row['avg_sites_per_day']:>9.1f} "
+                      f"{row['avg_sites_per_hour']:>8.1f} "
+                      f"{row['avg_transition_min']:>8.1f}m "
+                      f"{row['total_active_hrs']:>5.1f}")
+
+        # Top locations
+        loc_counts = (visits_df["location"].value_counts().head(10)
+                      .reset_index())
+        loc_counts.columns = ["location", "visits"]
+        if not loc_counts.empty:
+            print(f"\n  Top 10 Locations:")
+            for _, row in loc_counts.iterrows():
+                loc = str(row["location"])[:50]
+                print(f"    {row['visits']:>3d}  {loc}")
+    else:
+        print("  No site visit data available.")
+
+    print(f"\n{'═' * 72}")
+    print(f"  Dashboard ready at http://localhost:8050")
+    print(f"{'═' * 72}\n")
+
+
+if __name__ == "__main__":
+    print_report()
+    app.run(debug=True, host="0.0.0.0", port=8050)

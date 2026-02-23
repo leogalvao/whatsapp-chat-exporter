@@ -1,0 +1,14 @@
+# Data files (JSON exports, media)
+data/**/*.json
+data/**/media/
+whatsapp-exporter/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+
+# Claude
+.claude/
