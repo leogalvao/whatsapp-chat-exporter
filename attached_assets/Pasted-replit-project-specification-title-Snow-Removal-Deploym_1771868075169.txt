@@ -1,0 +1,86 @@
+replit_project_specification:
+  title: "Snow Removal Deployment Tracking & Analytics System"
+  objective: >
+    Design a comprehensive data model and analytics system to track snow removal deployments. 
+    The system will use picture-submission timestamps as the primary proxy for job completion, 
+    track crew routing, handle recalls, and filter out non-reporting chatter to identify 
+    operational patterns.
+
+  data_model_entities:
+    Deployments:
+      description: "The overarching snow event being serviced."
+      attributes:
+        - deployment_id (UUID)
+        - deployment_type (Enum: Pre-treatment, Post-treatment, Snow & Ice Removal)
+        - expected_duration_hours (Float, default: 12.0)
+        - actual_duration_hours (Float)
+        - start_timestamp (DateTime)
+        - end_timestamp (DateTime)
+        - is_active (Boolean)
+
+    Locations:
+      description: "Specific service areas assigned during a deployment."
+      attributes:
+        - location_id (UUID)
+        - location_type (Enum: Sidewalk, Parking Lot)
+        - coordinates (GeoJSON / Lat-Long)
+        - expected_service_time_mins (Float)
+
+    Crews:
+      description: "Teams assigned to locations."
+      attributes:
+        - crew_id (UUID)
+        - crew_size (Integer)
+        - machines_assigned (List[String]: e.g., plow, spreader, snowblower)
+
+    JobLogs:
+      description: "Individual location visits recorded via picture submissions."
+      attributes:
+        - log_id (UUID)
+        - deployment_id (UUID, Foreign Key)
+        - crew_id (UUID, Foreign Key)
+        - location_id (UUID, Foreign Key)
+        - picture_submitted_at (DateTime) # Primary timestamp for work completion
+        - is_recall (Boolean) # Flags if the crew had to return to this location
+        - recall_added_time_mins (Float) # Extra time incurred due to recall
+
+    Senders:
+      description: "Users/System contacts interacting with the reporting system."
+      attributes:
+        - sender_id (UUID)
+        - sender_name (String)
+        - trackable (Boolean) # False for senders who just chat and don't contribute metrics
+
+    Routes_and_Travel:
+      description: "Tracks movement between point A and point B."
+      attributes:
+        - route_id (UUID)
+        - crew_id (UUID, Foreign Key)
+        - origin_location_id (UUID)
+        - destination_location_id (UUID)
+        - standard_travel_time_mins (Float)
+        - calculated_actual_duration_mins (Float) # Time between previous picture and current picture
+
+  business_logic_and_rules:
+    progress_tracking: >
+      Deployment progress is strictly calculated using the `picture_submitted_at` timestamps. 
+      Work at a location is considered complete only when the picture is received.
+    
+    sender_filtering: >
+      Before ingesting or calculating metrics from the messaging stream, the system MUST check 
+      the Senders table. If `trackable == False`, the messages are excluded from all KPI calculations.
+    
+    duration_calculations:
+      - Work Duration: "Delta between Crew's previous picture timestamp and current picture timestamp, MINUS average traffic/travel time."
+      - Recall Handling: "If `is_recall == True`, append the new time spent to the total deployment time rather than overwriting the original completion time."
+
+  analytics_and_kpis:
+    visualizations_required:
+      - routing_timeline: "Gantt chart or timeline showing Crew A's travel from Point A to Point B, highlighting the delta between standard travel time and reporting delays."
+      - deployment_burn_down: "Track actual hours vs the 12-hour baseline, including spikes caused by recalls."
+    
+    pattern_recognition_goals:
+      - average_traffic_time: "Calculate mean travel times between locations under different deployment types."
+      - task_averages: "Calculate the average completion time strictly for 'Sidewalks' vs 'Parking Lots'."
+      - correlation_analysis: "Identify patterns between `crew_size`, `machines_assigned`, and the speed of completion."
+      - delay_identification: "Highlight routes where [Time between pictures] > [Expected work time + Expected travel time]."
