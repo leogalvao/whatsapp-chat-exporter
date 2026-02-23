@@ -484,12 +484,174 @@ def get_filtered_df(chats, senders, noise_types, msg_types,
 
 app = Dash(
     __name__,
-    external_stylesheets=[dbc.themes.FLATLY],
+    external_stylesheets=[
+        dbc.themes.FLATLY,
+        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css",
+    ],
     suppress_callback_exceptions=True,
 )
 app.title = "WhatsApp Chat Dashboard"
 server = app.server
 server.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
+
+
+@server.route("/api/export-report", methods=["GET"])
+def api_export_report():
+    fmt = flask_request.args.get("format", "json")
+    df = DF_ALL.copy()
+    if df.empty:
+        return flask_jsonify({"error": "No data loaded"}), 400
+
+    scol = "sender_resolved"
+    ds = _build_daily_summary(df, scol)
+    visits_df = _build_site_visits(df, scol)
+    trans_df = _build_transitions(visits_df) if not visits_df.empty else pd.DataFrame()
+    sc = _build_crew_scorecard(visits_df, ds) if not visits_df.empty and not ds.empty else pd.DataFrame()
+    prod_df = _build_daily_productivity_score(df, scol)
+
+    total_msgs = len(df)
+    clean_msgs = len(df[df["noise_type"] == "clean"])
+    active_crews = df["chat"].nunique()
+    total_sites = len(visits_df)
+    avg_sites_hr = round(sc["avg_sites_per_hour"].mean(), 2) if not sc.empty else 0
+    avg_trans = round(sc["avg_transition_min"].mean(), 1) if not sc.empty else 0
+    avg_first_str = "N/A"
+    if not ds.empty:
+        avg_first = ds["first_hour"].mean()
+        fh = int(avg_first)
+        fm = int((avg_first - fh) * 60)
+        period = "AM" if fh < 12 else "PM"
+        dh = fh % 12 or 12
+        avg_first_str = f"{dh}:{fm:02d} {period}"
+
+    crew_metrics = []
+    if not sc.empty:
+        for _, r in sc.iterrows():
+            crew_metrics.append({
+                "crew": r["sender"],
+                "days_active": int(r["days_active"]),
+                "total_sites": int(r["total_sites"]),
+                "avg_sites_per_day": r["avg_sites_per_day"],
+                "avg_sites_per_hour": r["avg_sites_per_hour"],
+                "avg_transition_min": r["avg_transition_min"],
+                "total_active_hrs": r["total_active_hrs"],
+            })
+
+    daily_breakdown = []
+    if not ds.empty:
+        for _, r in ds.iterrows():
+            daily_breakdown.append({
+                "crew": r["sender"],
+                "date": str(r["date"]),
+                "first_report": r["first_time"].strftime("%I:%M %p") if pd.notna(r["first_time"]) else "N/A",
+                "last_report": r["last_time"].strftime("%I:%M %p") if pd.notna(r["last_time"]) else "N/A",
+                "window_hrs": round(r["window_hrs"], 1),
+                "messages": int(r["msg_count"]),
+                "avg_gap_min": round(r["avg_gap_min"], 1),
+            })
+
+    productivity_scores = []
+    if not prod_df.empty:
+        for _, r in prod_df.iterrows():
+            productivity_scores.append({
+                "crew": r["sender"],
+                "date": str(r["date"].date()) if hasattr(r["date"], "date") else str(r["date"]),
+                "productivity_score": float(r["productivity_score"]),
+                "pace_score": round(float(r["pace_score"]), 1),
+                "punctuality_score": round(float(r["punctuality_score"]), 1),
+                "coverage_score": round(float(r["coverage"]), 1),
+                "sites_visited": int(r["sites_visited"]),
+                "sites_per_hour": round(float(r["sites_per_hour"]), 2),
+            })
+
+    site_details = []
+    if not visits_df.empty:
+        for _, r in visits_df.iterrows():
+            site_details.append({
+                "crew": r["sender"],
+                "date": str(r["date"].date()) if hasattr(r["date"], "date") else str(r["date"]),
+                "location": r["location"],
+                "start_time": r["start_time"].strftime("%I:%M %p") if pd.notna(r["start_time"]) else "",
+                "end_time": r["end_time"].strftime("%I:%M %p") if pd.notna(r["end_time"]) else "",
+                "duration_min": round(r["duration_min"], 1),
+                "messages": int(r["msg_count"]),
+            })
+
+    transitions = []
+    if not trans_df.empty:
+        for _, r in trans_df.iterrows():
+            transitions.append({
+                "crew": r["sender"],
+                "date": str(r["date"].date()) if hasattr(r["date"], "date") else str(r["date"]),
+                "from": r["from_location"],
+                "to": r["to_location"],
+                "transition_min": round(r["transition_min"], 1),
+            })
+
+    report = {
+        "generated_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "summary": {
+            "total_messages": total_msgs,
+            "clean_messages": clean_msgs,
+            "noise_messages": total_msgs - clean_msgs,
+            "active_crews": active_crews,
+            "total_sites_visited": total_sites,
+            "avg_sites_per_hour": avg_sites_hr,
+            "avg_first_report": avg_first_str,
+            "avg_transition_min": avg_trans,
+        },
+        "crew_metrics": crew_metrics,
+        "daily_breakdown": daily_breakdown,
+        "productivity_scores": productivity_scores,
+        "site_visits": site_details,
+        "transitions": transitions,
+    }
+
+    if fmt == "csv":
+        import io, csv
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Section: Summary"])
+        for k, v in report["summary"].items():
+            writer.writerow([k, v])
+        writer.writerow([])
+
+        if crew_metrics:
+            writer.writerow(["Section: Crew Metrics"])
+            writer.writerow(crew_metrics[0].keys())
+            for row in crew_metrics:
+                writer.writerow(row.values())
+            writer.writerow([])
+
+        if daily_breakdown:
+            writer.writerow(["Section: Daily Breakdown"])
+            writer.writerow(daily_breakdown[0].keys())
+            for row in daily_breakdown:
+                writer.writerow(row.values())
+            writer.writerow([])
+
+        if productivity_scores:
+            writer.writerow(["Section: Productivity Scores"])
+            writer.writerow(productivity_scores[0].keys())
+            for row in productivity_scores:
+                writer.writerow(row.values())
+            writer.writerow([])
+
+        if site_details:
+            writer.writerow(["Section: Site Visits"])
+            writer.writerow(site_details[0].keys())
+            for row in site_details:
+                writer.writerow(row.values())
+
+        resp = server.make_response(output.getvalue())
+        resp.headers["Content-Type"] = "text/csv"
+        resp.headers["Content-Disposition"] = "attachment; filename=metrics_report.csv"
+        return resp
+
+    resp = server.make_response(json.dumps(report, indent=2, ensure_ascii=False))
+    resp.headers["Content-Type"] = "application/json"
+    resp.headers["Content-Disposition"] = "attachment; filename=metrics_report.json"
+    return resp
 
 
 @server.route("/api/upload-folder", methods=["POST"])
@@ -943,7 +1105,23 @@ def serve_layout():
     return dbc.Container(
         [
             upload_section,
-            html.Div(id="kpi-bar", className="mb-2"),
+            dbc.Row([
+                dbc.Col(html.Div(id="kpi-bar"), md=10),
+                dbc.Col(html.Div([
+                    html.A(
+                        [html.I(className="bi bi-download me-1"), "Export JSON"],
+                        href="/api/export-report?format=json",
+                        className="btn btn-outline-primary btn-sm d-block mb-1",
+                        download="metrics_report.json",
+                    ),
+                    html.A(
+                        [html.I(className="bi bi-file-earmark-spreadsheet me-1"), "Export CSV"],
+                        href="/api/export-report?format=csv",
+                        className="btn btn-outline-success btn-sm d-block",
+                        download="metrics_report.csv",
+                    ),
+                ], className="d-flex flex-column align-items-end pt-1"), md=2),
+            ], className="mb-2 g-0"),
             dbc.Row(
                 [
                     dbc.Col(_build_sidebar(), md=3, className="pe-0"),
