@@ -22,6 +22,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
+from flask import request as flask_request, jsonify as flask_jsonify
 from dash import Dash, Input, Output, State, callback_context, dash_table, dcc, html
 import dash_bootstrap_components as dbc
 
@@ -487,8 +488,37 @@ app = Dash(
     suppress_callback_exceptions=True,
 )
 app.title = "WhatsApp Chat Dashboard"
+server = app.server
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+
+@server.route("/api/upload-folder", methods=["POST"])
+def api_upload_folder():
+    archive_dir = os.path.join(DATA_DIR, "archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    saved = []
+    errors = []
+    files = flask_request.files.getlist("files")
+    for f in files:
+        try:
+            raw = f.read()
+            data = json.loads(raw.decode("utf-8"))
+            if "exportInfo" not in data or "messages" not in data:
+                errors.append(f.filename)
+                continue
+            safe_name = os.path.basename(f.filename)
+            safe_name = re.sub(r"[^\w.\-]", "_", safe_name)
+            if not safe_name.endswith(".json"):
+                safe_name += ".json"
+            save_path = os.path.join(archive_dir, safe_name)
+            with open(save_path, "w", encoding="utf-8") as out:
+                json.dump(data, out, ensure_ascii=False)
+            saved.append(safe_name)
+        except Exception as e:
+            errors.append(str(f.filename))
+    if saved:
+        _reload_global_data()
+    return flask_jsonify({"saved": saved, "errors": errors})
+
 
 # ── Main content (tabs) ─────────────────────────────────────────────────────
 
@@ -598,38 +628,132 @@ main_content = dbc.Tabs(
 
 # ── Upload component ─────────────────────────────────────────────────────────
 
-upload_section = dbc.Card(
-    dbc.CardBody([
-        dbc.Row([
-            dbc.Col([
-                dcc.Upload(
-                    id="upload-data",
-                    children=html.Div([
-                        html.I(className="bi bi-cloud-upload me-2"),
-                        "Drag & drop WhatsApp JSON exports here, or ",
-                        html.A("click to browse", className="text-primary fw-bold"),
-                    ]),
-                    style={
-                        "borderWidth": "2px",
-                        "borderStyle": "dashed",
-                        "borderRadius": "8px",
-                        "borderColor": "#adb5bd",
-                        "textAlign": "center",
-                        "padding": "20px",
-                        "cursor": "pointer",
-                        "backgroundColor": "#f8f9fa",
-                    },
-                    multiple=True,
-                    accept=".json",
-                ),
-            ], md=10),
-            dbc.Col([
-                html.Div(id="upload-status", className="mt-2 text-center"),
-            ], md=2, className="d-flex align-items-center"),
-        ]),
-    ]),
-    className="mb-2 shadow-sm",
-)
+upload_section = html.Div([
+    dbc.Row([
+        dbc.Col([
+            dcc.Upload(
+                id="upload-data",
+                children=html.Div([
+                    "Drag & drop JSON files here, or ",
+                    html.A("click to browse files", className="text-primary fw-bold"),
+                ], style={"lineHeight": "40px"}),
+                style={
+                    "borderWidth": "2px",
+                    "borderStyle": "dashed",
+                    "borderRadius": "8px",
+                    "borderColor": "#adb5bd",
+                    "textAlign": "center",
+                    "padding": "10px 15px",
+                    "cursor": "pointer",
+                    "backgroundColor": "#f8f9fa",
+                    "height": "60px",
+                },
+                multiple=True,
+                accept=".json",
+            ),
+        ], width=5),
+        dbc.Col([
+            html.Div(
+                [
+                    html.Span("or "),
+                    html.A("Upload a Folder", id="folder-upload-btn",
+                           className="text-primary fw-bold",
+                           style={"cursor": "pointer", "textDecoration": "underline"}),
+                    html.Span(" containing JSON files"),
+                ],
+                style={
+                    "borderWidth": "2px",
+                    "borderStyle": "dashed",
+                    "borderRadius": "8px",
+                    "borderColor": "#adb5bd",
+                    "textAlign": "center",
+                    "padding": "10px 15px",
+                    "backgroundColor": "#f8f9fa",
+                    "height": "60px",
+                    "lineHeight": "40px",
+                },
+            ),
+        ], width=5),
+        dbc.Col([
+            html.Div(id="upload-status", className="text-center",
+                     style={"lineHeight": "60px"}),
+        ], width=2),
+    ], className="g-2 mb-2"),
+])
+
+_FOLDER_UPLOAD_JS = """
+<script>
+(function() {
+    function setupFolderUpload() {
+        var btn = document.getElementById('folder-upload-btn');
+        if (!btn) { setTimeout(setupFolderUpload, 500); return; }
+        if (btn.dataset.bound) return;
+        btn.dataset.bound = '1';
+
+        var inp = document.createElement('input');
+        inp.type = 'file';
+        inp.setAttribute('webkitdirectory', '');
+        inp.setAttribute('directory', '');
+        inp.setAttribute('multiple', '');
+        inp.style.display = 'none';
+        document.body.appendChild(inp);
+
+        btn.addEventListener('click', function() { inp.click(); });
+
+        inp.addEventListener('change', function() {
+            if (!inp.files || inp.files.length === 0) return;
+            var formData = new FormData();
+            var count = 0;
+            for (var i = 0; i < inp.files.length; i++) {
+                if (inp.files[i].name.endsWith('.json')) {
+                    formData.append('files', inp.files[i]);
+                    count++;
+                }
+            }
+            if (count === 0) {
+                alert('No JSON files found in the selected folder.');
+                return;
+            }
+            btn.textContent = 'Uploading ' + count + ' file(s)...';
+            btn.style.color = '#0d6efd';
+
+            fetch('/api/upload-folder', { method: 'POST', body: formData })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.saved && data.saved.length > 0) {
+                    btn.textContent = data.saved.length + ' file(s) uploaded!';
+                    btn.style.color = '#198754';
+                    setTimeout(function() { window.location.reload(); }, 800);
+                } else {
+                    btn.textContent = 'No valid exports found';
+                    btn.style.color = '#dc3545';
+                    setTimeout(function() {
+                        btn.textContent = 'Upload Folder';
+                        btn.style.color = '#495057';
+                    }, 3000);
+                }
+            })
+            .catch(function(e) {
+                btn.textContent = 'Upload failed';
+                btn.style.color = '#dc3545';
+                setTimeout(function() {
+                    btn.textContent = 'Upload Folder';
+                    btn.style.color = '#495057';
+                }, 3000);
+            });
+            inp.value = '';
+        });
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', setupFolderUpload);
+    } else {
+        setupFolderUpload();
+    }
+})();
+</script>
+"""
+
+app.index_string = app.index_string.replace("</body>", _FOLDER_UPLOAD_JS + "</body>")
 
 
 # ── App layout (function so it refreshes after data upload) ─────────────────
