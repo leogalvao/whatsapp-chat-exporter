@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 from dash import Dash, Input, Output, State, callback_context, dash_table, dcc, html
 import dash_bootstrap_components as dbc
 
@@ -652,10 +653,22 @@ main_content = dbc.Tabs(
         ]),
         dbc.Tab(label="Deployments", tab_id="tab-deployments", children=[
             dbc.Row([
+                dbc.Col(
+                    dbc.Button("Download Report", id="btn-download-deployment-pdf",
+                               color="primary", size="sm"),
+                    width="auto",
+                ),
+                dcc.Download(id="download-deployment-pdf"),
+            ], className="mt-3 mb-2 ms-1"),
+            dbc.Row([
                 dbc.Col(html.Div(id="deployment-summary-container"), md=12),
-            ], className="mt-3"),
+            ]),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-deployment-timeline"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-deployment-first-report"), md=6),
+                dbc.Col(dcc.Graph(id="chart-deployment-transition-box"), md=6),
             ]),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-deployment-crew-trend"), md=12),
@@ -1940,18 +1953,20 @@ def chart_top_locations(chats, senders, quality, msg_types, time_range,
     return fig
 
 
-# ── Deployment Callback 1: Deployment Summary Table ──────────────────────────
+# ── Deployment builder functions ──────────────────────────────────────────────
 
-@app.callback(Output("deployment-summary-container", "children"), FILTER_INPUTS)
-def deployment_summary_table(chats, senders, quality, msg_types, time_range,
-                             use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
+
+def _build_deployment_summary_data(df):
+    """Build deployment summary DataFrame and per-deployment crew breakdowns.
+
+    Returns (dep_df, crew_breakdowns) where crew_breakdowns is a dict
+    mapping deployment label to its crew scorecard DataFrame.
+    """
     if df.empty or df["deployment"].isna().all():
-        return html.P("No deployment data for current filters",
-                       className="text-muted p-3")
+        return pd.DataFrame(), {}
 
     rows = []
+    crew_breakdowns = {}
     for dep_label, grp in df.groupby("deployment"):
         dep_info = next(
             (d for d in ALL_DEPLOYMENTS_LIST if d["label"] == dep_label), None)
@@ -1964,6 +1979,22 @@ def deployment_summary_table(chats, senders, quality, msg_types, time_range,
         sc = _build_crew_scorecard(visits_df, ds)
         avg_sites_hr = sc["avg_sites_per_hour"].mean() if not sc.empty else 0
 
+        if not ds.empty:
+            avg_first = ds["first_hour"].mean()
+            fh = int(avg_first)
+            fm = int((avg_first - fh) * 60)
+            period = "AM" if fh < 12 else "PM"
+            dh = fh % 12 or 12
+            avg_first_str = f"{dh}:{fm:02d} {period}"
+            avg_window = round(ds["window_hrs"].mean(), 1)
+            consistency = round(ds["window_hrs"].std(), 1) if len(ds) > 1 else 0.0
+        else:
+            avg_first_str = "N/A"
+            avg_window = 0.0
+            consistency = 0.0
+        avg_trans = round(sc["avg_transition_min"].mean(), 1) if not sc.empty else 0.0
+        active_per_crew = round(sc["total_active_hrs"].mean(), 1) if not sc.empty else 0.0
+
         rows.append({
             "Deployment": dep_label,
             "Days": days,
@@ -1971,29 +2002,20 @@ def deployment_summary_table(chats, senders, quality, msg_types, time_range,
             "Total Messages": n_msgs,
             "Total Sites": total_sites,
             "Avg Sites/Hr": round(avg_sites_hr, 1),
+            "Avg First Report": avg_first_str,
+            "Avg Window (hrs)": avg_window,
+            "Avg Transition (min)": avg_trans,
+            "Active Hrs/Crew": active_per_crew,
+            "Consistency (std)": consistency,
         })
+        if not sc.empty:
+            crew_breakdowns[dep_label] = sc
 
-    dep_df = pd.DataFrame(rows)
-    table = dash_table.DataTable(
-        data=dep_df.to_dict("records"),
-        columns=[{"name": c, "id": c} for c in dep_df.columns],
-        sort_action="native",
-        style_table={"overflowX": "auto"},
-        style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
-        style_header={
-            "backgroundColor": "#2c3e50", "color": "white", "fontWeight": "bold",
-        },
-    )
-    return html.Div([html.H5("Deployment Summary", className="mb-2"), table])
+    return pd.DataFrame(rows), crew_breakdowns
 
 
-# ── Deployment Callback 2: Deployment Timeline ──────────────────────────────
-
-@app.callback(Output("chart-deployment-timeline", "figure"), FILTER_INPUTS)
-def chart_deployment_timeline(chats, senders, quality, msg_types, time_range,
-                              use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
+def _build_deployment_timeline_fig(df):
+    """Build deployment timeline Gantt chart."""
     if df.empty or df["deployment"].isna().all():
         return _empty_fig("Deployment Timeline")
 
@@ -2025,7 +2047,6 @@ def chart_deployment_timeline(chats, senders, quality, msg_types, time_range,
         title="Deployment Timeline",
         color_discrete_sequence=px.colors.qualitative.T10,
     )
-    # Add message count as text on each bar
     for i, row in dep_df.iterrows():
         fig.add_annotation(
             x=row["Start"] + (row["End"] - row["Start"]) / 2,
@@ -2045,14 +2066,107 @@ def chart_deployment_timeline(chats, senders, quality, msg_types, time_range,
     return fig
 
 
-# ── Deployment Callback 3: Cross-Deployment Crew Comparison ─────────────────
+def _build_deployment_first_report_fig(df):
+    """Build grouped bar chart of avg first report time by deployment."""
+    if df.empty or df["deployment"].isna().all():
+        return _empty_fig("First Report Time by Deployment")
 
-@app.callback(Output("chart-deployment-crew-comparison", "figure"), FILTER_INPUTS)
-def chart_deployment_crew_comparison(chats, senders, quality, msg_types,
-                                     time_range, use_resolved, date_start,
-                                     date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
+    dep_order = [d["label"] for d in ALL_DEPLOYMENTS_LIST]
+    rows = []
+    for dep_label, grp in df.groupby("deployment"):
+        ds = _build_daily_summary(grp, "chat")
+        if ds.empty:
+            continue
+        for crew, crew_grp in ds.groupby("sender"):
+            rows.append({
+                "Deployment": dep_label,
+                "Crew": crew,
+                "Avg First Hour": crew_grp["first_hour"].mean(),
+            })
+
+    if not rows:
+        return _empty_fig("First Report Time by Deployment")
+
+    fr_df = pd.DataFrame(rows)
+    overall_mean = fr_df["Avg First Hour"].mean()
+
+    fig = px.bar(
+        fr_df, x="Deployment", y="Avg First Hour", color="Crew",
+        barmode="group",
+        title="Avg First Report Time by Deployment",
+        labels={"Avg First Hour": "First Report (hour)", "Crew": "Crew"},
+        color_discrete_sequence=px.colors.qualitative.T10,
+    )
+    fig.add_hline(
+        y=overall_mean, line_dash="dash", line_color="#2c3e50",
+        annotation_text=f"Overall avg {int(overall_mean)}:{int((overall_mean % 1) * 60):02d}",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        template="plotly_white",
+        yaxis=dict(
+            autorange="reversed",
+            dtick=1,
+            ticktext=[f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}"
+                      for h in range(0, 25)],
+            tickvals=list(range(0, 25)),
+        ),
+        xaxis={"categoryorder": "array", "categoryarray": dep_order},
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        legend=dict(font=dict(size=10)),
+    )
+    return fig
+
+
+def _build_deployment_transition_box_fig(df):
+    """Build box plot of transition times by deployment."""
+    if df.empty or df["deployment"].isna().all():
+        return _empty_fig("Transition Time by Deployment")
+
+    dep_order = [d["label"] for d in ALL_DEPLOYMENTS_LIST]
+    all_trans = []
+    for dep_label, grp in df.groupby("deployment"):
+        visits_df = _build_site_visits(grp, "chat")
+        if visits_df.empty:
+            continue
+        trans_df = _build_transitions(visits_df)
+        if trans_df.empty:
+            continue
+        trans_df = trans_df.copy()
+        trans_df["Deployment"] = dep_label
+        all_trans.append(trans_df)
+
+    if not all_trans:
+        return _empty_fig("Transition Time by Deployment")
+
+    trans_all = pd.concat(all_trans, ignore_index=True)
+    overall_median = trans_all["transition_min"].median()
+
+    fig = px.box(
+        trans_all, x="Deployment", y="transition_min", points="all",
+        title="Transition Time by Deployment (minutes)",
+        labels={"transition_min": "Transition (min)", "Deployment": "Deployment"},
+        color="Deployment",
+        color_discrete_sequence=px.colors.qualitative.T10,
+    )
+    fig.add_hline(
+        y=overall_median, line_dash="dash", line_color="#2c3e50",
+        annotation_text=f"Median {overall_median:.0f} min",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        template="plotly_white",
+        xaxis={"categoryorder": "array", "categoryarray": dep_order},
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=400,
+        showlegend=False,
+    )
+    return fig
+
+
+def _build_deployment_crew_comparison_fig(df):
+    """Build cross-deployment crew comparison bar chart."""
     if df.empty or df["deployment"].isna().all():
         return _empty_fig("Cross-Deployment Crew Comparison")
 
@@ -2089,41 +2203,31 @@ def chart_deployment_crew_comparison(chats, senders, quality, msg_types,
     return fig
 
 
-# ── Deployment Callback 4: Deployment Sites Heatmap ─────────────────────────
-
-@app.callback(Output("chart-deployment-sites-heatmap", "figure"), FILTER_INPUTS)
-def chart_deployment_sites_heatmap(chats, senders, quality, msg_types,
-                                   time_range, use_resolved, date_start,
-                                   date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
+def _build_deployment_sites_heatmap_fig(df):
+    """Build deployment x sites heatmap figure."""
+    title = "Deployment \u00d7 Sites Heatmap"
     if df.empty or df["deployment"].isna().all():
-        return _empty_fig("Deployment \u00d7 Sites Heatmap")
+        return _empty_fig(title)
 
     visits_df = _build_site_visits(df, "chat")
     if visits_df.empty:
-        return _empty_fig("Deployment \u00d7 Sites Heatmap")
+        return _empty_fig(title)
 
-    # Map visit dates to deployment labels
     visits_df = visits_df.copy()
     visits_df["deployment"] = visits_df["date"].apply(
         lambda d: _date_to_deployment.get(
             d.date() if hasattr(d, "date") else d, ""))
     visits_df = visits_df[visits_df["deployment"] != ""]
 
-    # Count visits per (deployment, location)
     heat = (visits_df.groupby(["deployment", "location"])
             .size().reset_index(name="visits"))
-
-    # Top 20 locations by total visits
     top_locs = (heat.groupby("location")["visits"].sum()
                 .sort_values(ascending=False).head(20).index.tolist())
     heat = heat[heat["location"].isin(top_locs)]
 
     if heat.empty:
-        return _empty_fig("Deployment \u00d7 Sites Heatmap")
+        return _empty_fig(title)
 
-    # Pivot for heatmap
     pivot = heat.pivot_table(index="deployment", columns="location",
                              values="visits", fill_value=0)
     dep_order = [d["label"] for d in ALL_DEPLOYMENTS_LIST
@@ -2145,7 +2249,7 @@ def chart_deployment_sites_heatmap(chats, senders, quality, msg_types,
     ))
     fig.update_layout(
         template="plotly_white",
-        title="Deployment \u00d7 Sites Heatmap (top 20 locations)",
+        title=f"{title} (top 20 locations)",
         xaxis_title="Location",
         yaxis_title="Deployment",
         margin=dict(l=10, r=10, t=40, b=80),
@@ -2155,17 +2259,11 @@ def chart_deployment_sites_heatmap(chats, senders, quality, msg_types,
     return fig
 
 
-# ── Deployment Callback 5: Crew Performance Trend Across Deployments ─────────
-
-@app.callback(Output("chart-deployment-crew-trend", "figure"), FILTER_INPUTS)
-def chart_deployment_crew_trend(chats, senders, quality, msg_types, time_range,
-                                use_resolved, date_start, date_end, deployments):
-    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
-                 date_start, date_end, deployments)
+def _build_deployment_crew_trend_fig(df):
+    """Build crew performance trend across deployments."""
     if df.empty or df["deployment"].isna().all():
         return _empty_fig("Crew Performance Trend Across Deployments")
 
-    # Order deployments chronologically
     dep_order = [d["label"] for d in ALL_DEPLOYMENTS_LIST]
 
     rows = []
@@ -2190,12 +2288,9 @@ def chart_deployment_crew_trend(chats, senders, quality, msg_types, time_range,
         return _empty_fig("Crew Performance Trend Across Deployments")
 
     trend_df = pd.DataFrame(rows)
-
-    # Compute overall average per deployment for the reference line
     dep_avg = (trend_df.groupby("Deployment")["Sites/Hr"]
                .mean().reset_index(name="Avg Sites/Hr"))
 
-    # Sort by deployment order
     trend_df["dep_idx"] = trend_df["Deployment"].map(
         {label: i for i, label in enumerate(dep_order)})
     trend_df = trend_df.sort_values("dep_idx")
@@ -2224,7 +2319,6 @@ def chart_deployment_crew_trend(chats, senders, quality, msg_types, time_range,
                 "<extra></extra>"),
         ))
 
-    # Add deployment average as dashed line
     fig.add_trace(go.Scatter(
         x=dep_avg["Deployment"],
         y=dep_avg["Avg Sites/Hr"],
@@ -2247,6 +2341,229 @@ def chart_deployment_crew_trend(chats, senders, quality, msg_types, time_range,
         hovermode="x unified",
     )
     return fig
+
+
+# ── Deployment Callbacks (thin wrappers) ─────────────────────────────────────
+
+@app.callback(Output("deployment-summary-container", "children"), FILTER_INPUTS)
+def deployment_summary_table(chats, senders, quality, msg_types, time_range,
+                             use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    dep_df, _ = _build_deployment_summary_data(df)
+    if dep_df.empty:
+        return html.P("No deployment data for current filters",
+                       className="text-muted p-3")
+    table = dash_table.DataTable(
+        data=dep_df.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in dep_df.columns],
+        sort_action="native",
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+        style_header={
+            "backgroundColor": "#2c3e50", "color": "white", "fontWeight": "bold",
+        },
+    )
+    return html.Div([html.H5("Deployment Summary", className="mb-2"), table])
+
+
+@app.callback(Output("chart-deployment-timeline", "figure"), FILTER_INPUTS)
+def chart_deployment_timeline(chats, senders, quality, msg_types, time_range,
+                              use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    return _build_deployment_timeline_fig(df)
+
+
+@app.callback(Output("chart-deployment-first-report", "figure"), FILTER_INPUTS)
+def chart_deployment_first_report(chats, senders, quality, msg_types, time_range,
+                                  use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    return _build_deployment_first_report_fig(df)
+
+
+@app.callback(Output("chart-deployment-transition-box", "figure"), FILTER_INPUTS)
+def chart_deployment_transition_box(chats, senders, quality, msg_types, time_range,
+                                    use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    return _build_deployment_transition_box_fig(df)
+
+@app.callback(Output("chart-deployment-crew-comparison", "figure"), FILTER_INPUTS)
+def chart_deployment_crew_comparison(chats, senders, quality, msg_types,
+                                     time_range, use_resolved, date_start,
+                                     date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    return _build_deployment_crew_comparison_fig(df)
+
+
+@app.callback(Output("chart-deployment-sites-heatmap", "figure"), FILTER_INPUTS)
+def chart_deployment_sites_heatmap(chats, senders, quality, msg_types,
+                                   time_range, use_resolved, date_start,
+                                   date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    return _build_deployment_sites_heatmap_fig(df)
+
+
+@app.callback(Output("chart-deployment-crew-trend", "figure"), FILTER_INPUTS)
+def chart_deployment_crew_trend(chats, senders, quality, msg_types, time_range,
+                                use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    return _build_deployment_crew_trend_fig(df)
+
+
+# ── Deployment Download Callback ─────────────────────────────────────────────
+
+FILTER_STATES = [
+    State("filter-chats", "value"),
+    State("filter-senders", "value"),
+    State("filter-quality", "value"),
+    State("filter-types", "value"),
+    State("filter-time", "value"),
+    State("filter-resolved", "value"),
+    State("filter-dates", "start_date"),
+    State("filter-dates", "end_date"),
+    State("filter-deployment", "value"),
+]
+
+
+@app.callback(
+    Output("download-deployment-pdf", "data"),
+    Input("btn-download-deployment-pdf", "n_clicks"),
+    FILTER_STATES,
+    prevent_initial_call=True,
+)
+def download_deployment_report(n_clicks, chats, senders, quality, msg_types,
+                               time_range, use_resolved, date_start, date_end,
+                               deployments):
+    if not n_clicks:
+        return None
+
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+
+    # Build all figures
+    dep_df, crew_breakdowns = _build_deployment_summary_data(df)
+    fig_timeline = _build_deployment_timeline_fig(df)
+    fig_first_report = _build_deployment_first_report_fig(df)
+    fig_transition = _build_deployment_transition_box_fig(df)
+    fig_crew_trend = _build_deployment_crew_trend_fig(df)
+    fig_crew_comp = _build_deployment_crew_comparison_fig(df)
+    fig_heatmap = _build_deployment_sites_heatmap_fig(df)
+
+    # Convert figures to embedded HTML
+    pjs = "cdn"
+    chart_timeline = pio.to_html(fig_timeline, full_html=False, include_plotlyjs=pjs)
+    chart_first = pio.to_html(fig_first_report, full_html=False, include_plotlyjs=False)
+    chart_trans = pio.to_html(fig_transition, full_html=False, include_plotlyjs=False)
+    chart_trend = pio.to_html(fig_crew_trend, full_html=False, include_plotlyjs=False)
+    chart_comp = pio.to_html(fig_crew_comp, full_html=False, include_plotlyjs=False)
+    chart_heat = pio.to_html(fig_heatmap, full_html=False, include_plotlyjs=False)
+
+    # Summary table HTML
+    summary_html = ""
+    if not dep_df.empty:
+        summary_html = dep_df.to_html(index=False, classes="summary-table",
+                                       border=0)
+
+    # Per-deployment crew breakdown tables
+    breakdown_html = ""
+    for dep_label, sc in crew_breakdowns.items():
+        sc_display = sc.rename(columns={
+            "sender": "Crew",
+            "days_active": "Days",
+            "total_sites": "Sites",
+            "avg_sites_per_day": "Sites/Day",
+            "avg_sites_per_hour": "Sites/Hr",
+            "avg_transition_min": "Transition (min)",
+            "total_active_hrs": "Active Hrs",
+        })
+        breakdown_html += f"<h3>{dep_label}</h3>\n"
+        breakdown_html += sc_display.to_html(index=False, classes="breakdown-table",
+                                              border=0)
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    filename = f"deployment_report_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Deployment Report — {now_str}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         margin: 2em; color: #2c3e50; }}
+  h1 {{ color: #2c3e50; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3em; }}
+  h2 {{ color: #34495e; margin-top: 2em; }}
+  h3 {{ color: #7f8c8d; }}
+  .summary-table, .breakdown-table {{
+    border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 13px;
+  }}
+  .summary-table th, .breakdown-table th {{
+    background: #2c3e50; color: white; padding: 8px 12px; text-align: left;
+  }}
+  .summary-table td, .breakdown-table td {{
+    padding: 6px 12px; border-bottom: 1px solid #ecf0f1;
+  }}
+  .summary-table tr:nth-child(even), .breakdown-table tr:nth-child(even) {{
+    background: #f8f9fa;
+  }}
+  .chart-row {{ display: flex; gap: 1em; margin: 1em 0; }}
+  .chart-row > div {{ flex: 1; }}
+  @media print {{
+    body {{ margin: 0.5em; font-size: 11px; }}
+    .chart-row {{ page-break-inside: avoid; }}
+    h2 {{ page-break-before: auto; }}
+    .plotly-graph-div {{ max-height: 350px !important; }}
+  }}
+</style>
+</head>
+<body>
+<h1>Deployment Report</h1>
+<p>Generated: {now_str}</p>
+
+<h2>Summary</h2>
+{summary_html}
+
+<h2>Deployment Timeline</h2>
+{chart_timeline}
+
+<div class="chart-row">
+  <div>
+    <h2>First Report Time</h2>
+    {chart_first}
+  </div>
+  <div>
+    <h2>Transition Time</h2>
+    {chart_trans}
+  </div>
+</div>
+
+<h2>Crew Performance Trend</h2>
+{chart_trend}
+
+<div class="chart-row">
+  <div>
+    <h2>Crew Comparison</h2>
+    {chart_comp}
+  </div>
+  <div>
+    <h2>Sites Heatmap</h2>
+    {chart_heat}
+  </div>
+</div>
+
+<h2>Per-Deployment Crew Breakdown</h2>
+{breakdown_html}
+
+</body>
+</html>"""
+
+    return dcc.send_bytes(html_content.encode("utf-8"), filename)
 
 
 # ── Helper: empty figure ─────────────────────────────────────────────────────
