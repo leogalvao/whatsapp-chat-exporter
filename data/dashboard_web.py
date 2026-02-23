@@ -30,7 +30,8 @@ import dash_bootstrap_components as dbc
 from domain_model import (
     load_config, build_job_logs, build_crew_summary, build_route_segments,
     build_deployment_burndown, build_location_type_stats, build_traffic_analysis,
-    build_delay_report, infer_location_type
+    build_delay_report, infer_location_type,
+    build_location_coords, haversine_km,
 )
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -3772,7 +3773,8 @@ def chart_routing_gantt(chats, senders, quality, msg_types, time_range,
         job_logs = build_job_logs(df, SNOW_CONFIG)
         if job_logs.empty:
             return _empty_fig("Crew Routing Timeline")
-        segments = build_route_segments(job_logs, SNOW_CONFIG)
+        loc_coords = build_location_coords(SNOW_CONFIG.get("location_registry", []))
+        segments = build_route_segments(job_logs, SNOW_CONFIG, loc_coords)
         if segments.empty:
             return _empty_fig("Crew Routing Timeline")
         gantt_data = []
@@ -3781,11 +3783,22 @@ def chart_routing_gantt(chats, senders, quality, msg_types, time_range,
             t1 = seg["end_time"]
             if pd.isna(t0) or pd.isna(t1):
                 continue
+            dist = seg.get("distance_km", np.nan) if "distance_km" in segments.columns else np.nan
+            dur = seg.get("actual_duration_mins", np.nan)
+            eff = seg.get("travel_efficiency", np.nan) if "travel_efficiency" in segments.columns else np.nan
+            hover_extra = ""
+            if pd.notna(dist):
+                hover_extra += f" | {dist:.1f}km"
+            if pd.notna(dur):
+                hover_extra += f" | {dur:.0f}min"
+            if pd.notna(eff):
+                hover_extra += f" | eff:{eff:.0f}%"
             gantt_data.append({
                 "Crew": seg["crew"],
                 "Start": t0,
                 "Finish": t1,
                 "Location": seg["destination_location"] or "Unknown",
+                "Details": f"{seg['origin_location']} → {seg['destination_location']}{hover_extra}",
             })
         if not gantt_data:
             return _empty_fig("Crew Routing Timeline")
@@ -3793,6 +3806,7 @@ def chart_routing_gantt(chats, senders, quality, msg_types, time_range,
         fig = px.timeline(
             gantt_df, x_start="Start", x_end="Finish", y="Crew", color="Location",
             title="Crew Routing Timeline",
+            hover_data=["Details"] if "Details" in gantt_df.columns else None,
         )
         fig.update_layout(
             margin=dict(l=10, r=10, t=40, b=10),
@@ -3874,21 +3888,65 @@ def traffic_analysis(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        segments = build_route_segments(job_logs, SNOW_CONFIG)
+        loc_coords = build_location_coords(SNOW_CONFIG.get("location_registry", []))
+        segments = build_route_segments(job_logs, SNOW_CONFIG, loc_coords)
         traffic = build_traffic_analysis(segments)
         if traffic.empty:
             return html.P("No traffic data available.", className="text-muted p-3")
-        return html.Div([
-            html.H6("Avg Travel Time Between Locations", className="mb-2"),
+
+        col_labels = {
+            "origin": "From", "destination": "To",
+            "avg_travel_min": "Avg Actual (min)", "count": "Trips",
+            "std_travel_min": "Std Dev", "distance_km": "Distance (km)",
+            "est_travel_min": "Est. Travel (min)", "avg_efficiency": "Efficiency %",
+        }
+        display_cols = [c for c in traffic.columns if not traffic[c].isna().all()]
+        table_cols = [{"name": col_labels.get(c, c), "id": c} for c in display_cols]
+
+        children = [
+            html.H6("Travel Time vs Distance Between Locations", className="mb-2"),
             dash_table.DataTable(
                 data=traffic.to_dict("records"),
-                columns=[{"name": c, "id": c} for c in traffic.columns],
-                style_table={"overflowX": "auto", "maxHeight": "300px", "overflowY": "auto"},
+                columns=table_cols,
+                style_table={"overflowX": "auto", "maxHeight": "350px", "overflowY": "auto"},
                 style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
                 style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
-                page_size=10,
+                style_data_conditional=[
+                    {"if": {"filter_query": "{avg_efficiency} < 50", "column_id": "avg_efficiency"},
+                     "color": "#e74c3c", "fontWeight": "bold"},
+                    {"if": {"filter_query": "{avg_efficiency} >= 80", "column_id": "avg_efficiency"},
+                     "color": "#27ae60", "fontWeight": "bold"},
+                ],
+                page_size=15,
+                sort_action="native",
             ),
-        ])
+        ]
+
+        has_dist = "distance_km" in segments.columns
+        dist_segs = segments.dropna(subset=["distance_km", "actual_duration_mins"]) if has_dist else pd.DataFrame()
+        if not dist_segs.empty and len(dist_segs) >= 3:
+            fig_scatter = px.scatter(
+                dist_segs,
+                x="distance_km",
+                y="actual_duration_mins",
+                color="crew",
+                hover_data=["origin_location", "destination_location"],
+                labels={"distance_km": "Distance (km)", "actual_duration_mins": "Actual Travel (min)", "crew": "Crew"},
+                title="Actual Travel Time vs Distance",
+                color_discrete_sequence=px.colors.qualitative.Bold,
+            )
+            max_dist = dist_segs["distance_km"].max()
+            expected_x = [0, max_dist]
+            expected_y = [0, max_dist / 25.0 * 60]
+            fig_scatter.add_trace(go.Scatter(
+                x=expected_x, y=expected_y,
+                mode="lines", name="Expected (25 km/h)",
+                line=dict(dash="dash", color="gray", width=2),
+            ))
+            fig_scatter.update_layout(height=400, template="plotly_white")
+            children.append(dcc.Graph(figure=fig_scatter))
+
+        return html.Div(children)
     except Exception as e:
         print(f"[traffic-analysis] Error: {e}")
         return html.P("Error loading traffic analysis.", className="text-muted p-3")
@@ -3901,7 +3959,8 @@ def delay_report(chats, senders, quality, msg_types, time_range,
         df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
                      date_start, date_end, deployments)
         job_logs = build_job_logs(df, SNOW_CONFIG)
-        segments = build_route_segments(job_logs, SNOW_CONFIG)
+        loc_coords = build_location_coords(SNOW_CONFIG.get("location_registry", []))
+        segments = build_route_segments(job_logs, SNOW_CONFIG, loc_coords)
         delays = build_delay_report(segments, SNOW_CONFIG)
         if delays.empty:
             return html.P("No delayed segments found.", className="text-muted p-3")

@@ -8,11 +8,64 @@ This module is standalone and does NOT depend on dashboard_web.py or Dash.
 """
 
 import json
+import math
 import os
 import re
 
 import numpy as np
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Haversine distance calculation
+# ---------------------------------------------------------------------------
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def build_location_coords(location_registry):
+    norm = lambda s: re.sub(r"[^a-z0-9 ]", "", s.lower().strip())
+    coords = {}
+    for entry in location_registry:
+        lat = entry.get("lat")
+        lon = entry.get("lon")
+        if lat is None or lon is None or lat == "" or lon == "":
+            continue
+        try:
+            lat_f, lon_f = float(lat), float(lon)
+        except (ValueError, TypeError):
+            continue
+        for field in ["_matched_raw", "location_name", "address"]:
+            val = entry.get(field, "")
+            if val:
+                key = norm(val)
+                if key and key not in coords:
+                    coords[key] = (lat_f, lon_f)
+        mcl = entry.get("matched_chat_location", "")
+        if mcl and "(" in mcl:
+            raw = mcl.split("(")[0].strip()
+            key = norm(raw)
+            if key and key not in coords:
+                coords[key] = (float(lat), float(lon))
+    return coords
+
+
+CITY_AVG_SPEED_KMH = 25.0
+
+
+def estimate_travel_mins(distance_km, speed_kmh=None):
+    if speed_kmh is None:
+        speed_kmh = CITY_AVG_SPEED_KMH
+    if distance_km <= 0 or speed_kmh <= 0:
+        return 0.0
+    return (distance_km / speed_kmh) * 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -186,12 +239,13 @@ def build_job_logs(df, config):
     return job_logs_sorted[cols].reset_index(drop=True)
 
 
-def build_crew_summary(job_logs_df, config):
+def build_crew_summary(job_logs_df, config, location_coords=None):
     """Build per-crew summary statistics from job logs.
 
     Args:
         job_logs_df: DataFrame output of build_job_logs.
         config: Configuration dict (output of load_config).
+        location_coords: dict mapping normalized location name to (lat, lon).
 
     Returns:
         DataFrame with columns: crew, days_active, total_sites, total_recalls,
@@ -226,7 +280,7 @@ def build_crew_summary(job_logs_df, config):
         else:
             avg_sites_per_hour = 0.0
 
-        segments = build_route_segments(grp, config)
+        segments = build_route_segments(grp, config, location_coords)
         avg_transition_min = (
             segments["actual_duration_mins"].mean()
             if not segments.empty
@@ -251,7 +305,7 @@ def build_crew_summary(job_logs_df, config):
     return pd.DataFrame(rows, columns=cols)
 
 
-def build_route_segments(job_logs_df, config):
+def build_route_segments(job_logs_df, config, location_coords=None):
     """Build route segments from consecutive job logs for the same crew/day.
 
     Each pair of consecutive job log entries for the same crew on the same
@@ -260,20 +314,37 @@ def build_route_segments(job_logs_df, config):
     Args:
         job_logs_df: DataFrame output of build_job_logs.
         config: Configuration dict (output of load_config).
+        location_coords: dict mapping normalized location name to (lat, lon).
 
     Returns:
         DataFrame with columns: crew, date, origin_location,
         destination_location, standard_travel_time_mins,
-        actual_duration_mins, is_delayed.
+        actual_duration_mins, is_delayed, distance_km,
+        estimated_travel_mins, travel_efficiency.
     """
     cols = [
         "crew", "date", "origin_location", "destination_location",
         "start_time", "end_time",
         "standard_travel_time_mins", "actual_duration_mins", "is_delayed",
+        "distance_km", "estimated_travel_mins", "travel_efficiency",
     ]
 
     if job_logs_df is None or job_logs_df.empty:
         return _empty_df(cols)
+
+    if location_coords is None:
+        location_coords = {}
+
+    _norm = lambda s: re.sub(r"[^a-z0-9 ]", "", s.lower().strip())
+
+    def _lookup_coords(loc_name):
+        key = _norm(loc_name)
+        if key in location_coords:
+            return location_coords[key]
+        for k, v in location_coords.items():
+            if key in k or k in key:
+                return v
+        return None
 
     sorted_df = job_logs_df.sort_values(
         ["crew", "date", "picture_submitted_at"]
@@ -304,12 +375,26 @@ def build_route_segments(job_logs_df, config):
             else:
                 actual_mins = np.nan
 
+            dist_km = np.nan
+            est_travel = np.nan
+            efficiency = np.nan
+            o_coords = _lookup_coords(origin_loc)
+            d_coords = _lookup_coords(dest_loc)
+            if o_coords and d_coords:
+                dist_km = haversine_km(o_coords[0], o_coords[1], d_coords[0], d_coords[1])
+                est_travel = estimate_travel_mins(dist_km)
+                if std_travel is None and pd.notna(est_travel):
+                    std_travel = round(est_travel, 1)
+
             is_delayed = False
             if pd.notna(actual_mins) and std_travel is not None:
                 origin_type = origin.get("location_type", "Unknown")
                 svc_time = expected_service.get(origin_type, 0)
                 if actual_mins > svc_time + std_travel:
                     is_delayed = True
+
+            if pd.notna(actual_mins) and pd.notna(est_travel) and est_travel > 0:
+                efficiency = round(est_travel / actual_mins * 100, 1) if actual_mins > 0 else 100.0
 
             rows.append({
                 "crew": crew,
@@ -321,6 +406,9 @@ def build_route_segments(job_logs_df, config):
                 "standard_travel_time_mins": std_travel,
                 "actual_duration_mins": round(actual_mins, 1) if pd.notna(actual_mins) else np.nan,
                 "is_delayed": is_delayed,
+                "distance_km": round(dist_km, 2) if pd.notna(dist_km) else np.nan,
+                "estimated_travel_mins": round(est_travel, 1) if pd.notna(est_travel) else np.nan,
+                "travel_efficiency": efficiency if pd.notna(efficiency) else np.nan,
             })
 
     if not rows:
@@ -456,9 +544,10 @@ def build_traffic_analysis(route_segments_df):
 
     Returns:
         DataFrame with columns: origin, destination, avg_travel_min, count,
-        std_travel_min.
+        std_travel_min, distance_km, est_travel_min, avg_efficiency.
     """
-    cols = ["origin", "destination", "avg_travel_min", "count", "std_travel_min"]
+    cols = ["origin", "destination", "avg_travel_min", "count",
+            "std_travel_min", "distance_km", "est_travel_min", "avg_efficiency"]
 
     if route_segments_df is None or route_segments_df.empty:
         return _empty_df(cols)
@@ -467,22 +556,31 @@ def build_traffic_analysis(route_segments_df):
     if valid.empty:
         return _empty_df(cols)
 
-    stats = valid.groupby(
+    agg_dict = {
+        "actual_duration_mins": ["mean", "count", "std"],
+    }
+    if "distance_km" in valid.columns:
+        agg_dict["distance_km"] = "first"
+    if "estimated_travel_mins" in valid.columns:
+        agg_dict["estimated_travel_mins"] = "first"
+    if "travel_efficiency" in valid.columns:
+        agg_dict["travel_efficiency"] = "mean"
+
+    grouped = valid.groupby(
         ["origin_location", "destination_location"]
-    )["actual_duration_mins"].agg(
-        avg_travel_min="mean",
-        count="count",
-        std_travel_min="std",
-    ).reset_index()
+    ).agg(agg_dict)
+    grouped.columns = ["_".join(c) if c[1] else c[0] for c in grouped.columns]
+    grouped = grouped.reset_index()
 
-    stats = stats.rename(columns={
-        "origin_location": "origin",
-        "destination_location": "destination",
-    })
-
-    stats["avg_travel_min"] = stats["avg_travel_min"].round(1)
-    stats["std_travel_min"] = stats["std_travel_min"].round(1).fillna(0.0)
-    stats["count"] = stats["count"].astype(int)
+    stats = pd.DataFrame()
+    stats["origin"] = grouped["origin_location"]
+    stats["destination"] = grouped["destination_location"]
+    stats["avg_travel_min"] = grouped["actual_duration_mins_mean"].round(1)
+    stats["count"] = grouped["actual_duration_mins_count"].astype(int)
+    stats["std_travel_min"] = grouped["actual_duration_mins_std"].round(1).fillna(0.0)
+    stats["distance_km"] = grouped.get("distance_km_first", pd.Series(dtype=float)).round(2) if "distance_km_first" in grouped.columns else np.nan
+    stats["est_travel_min"] = grouped.get("estimated_travel_mins_first", pd.Series(dtype=float)).round(1) if "estimated_travel_mins_first" in grouped.columns else np.nan
+    stats["avg_efficiency"] = grouped.get("travel_efficiency_mean", pd.Series(dtype=float)).round(1) if "travel_efficiency_mean" in grouped.columns else np.nan
 
     return stats[cols]
 
