@@ -53,6 +53,13 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Distance-based travel efficiency analysis
+  - Haversine distance calculation between locations using registry coordinates
+  - Route segments now include distance_km, estimated_travel_mins (25 km/h city speed), and travel_efficiency %
+  - Traffic analysis table shows distance, estimated travel time, and efficiency with color coding (red < 50%, green >= 80%)
+  - Scatter plot: Actual Travel Time vs Distance with expected baseline (25 km/h)
+  - Gantt chart hover tooltips show distance, duration, and efficiency per segment
+  - build_crew_summary passes location_coords through to route segments
 - 2026-02-23: Added Location Registry and Map tab
   - Location CSV upload in Settings (supports routes format: Building Name, Billing Street, Crew Sidewalk, Crew Parking Lot)
   - Also supports legacy format: location_name, address, lat, lon
