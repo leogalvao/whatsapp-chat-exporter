@@ -527,50 +527,32 @@ main_content = dbc.Tabs(
     active_tab="tab-overview",
     children=[
         dbc.Tab(label="Overview", tab_id="tab-overview", children=[
+            html.Div([
+                html.H4("Overview", className="mb-1"),
+                html.P("High-level view of message volume, types, and activity patterns across all crews.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-msgs-per-chat"), md=6),
                 dbc.Col(dcc.Graph(id="chart-type-donut"), md=6),
-            ], className="mt-3"),
+            ]),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-heatmap"), md=6),
                 dbc.Col(dcc.Graph(id="chart-sender-chat"), md=6),
             ]),
-        ]),
-        dbc.Tab(label="Timeline", tab_id="tab-timeline", children=[
             dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-timeline"), md=12),
-            ], className="mt-3"),
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-kde"), md=12),
-            ]),
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-line-hourly"), md=12),
             ]),
         ]),
-        dbc.Tab(label="Senders", tab_id="tab-senders", children=[
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-msgs-per-sender"), md=6),
-                dbc.Col(dcc.Graph(id="chart-gap-box"), md=6),
-            ], className="mt-3"),
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-content-len"), md=12),
-            ]),
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-scatter-len-hour"), md=12),
-            ]),
-        ]),
-        dbc.Tab(label="Data Quality", tab_id="tab-quality", children=[
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-quality"), md=12),
-            ], className="mt-3"),
-            dbc.Row([
-                dbc.Col(html.Div(id="data-table-container"), md=12),
-            ], className="mt-3"),
-        ]),
-        dbc.Tab(label="Efficiency", tab_id="tab-efficiency", children=[
+        dbc.Tab(label="Productivity", tab_id="tab-productivity", children=[
+            html.Div([
+                html.H4("Productivity", className="mb-1"),
+                html.P("Track crew efficiency with daily scores, punctuality, pace, and idle time analysis.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
             dbc.Row([
                 dbc.Col(html.Div(id="efficiency-report-card"), md=12),
-            ], className="mt-3"),
+            ]),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-first-report"), md=12),
             ]),
@@ -578,8 +560,47 @@ main_content = dbc.Tabs(
                 dbc.Col(dcc.Graph(id="chart-report-window-box"), md=6),
                 dbc.Col(dcc.Graph(id="chart-daily-count-trend"), md=6),
             ]),
+            dbc.Row([
+                dbc.Col(html.Div(id="productivity-score-container"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(html.Div(id="crew-leaderboard-container"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-idle-gaps"), md=12),
+            ]),
+        ]),
+        dbc.Tab(label="Crew Analysis", tab_id="tab-crew", children=[
+            html.Div([
+                html.H4("Crew Analysis", className="mb-1"),
+                html.P("Deep dive into individual crew performance, site visits, routes, and transition times.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-msgs-per-sender"), md=6),
+                dbc.Col(dcc.Graph(id="chart-gap-box"), md=6),
+            ]),
+            dbc.Row([
+                dbc.Col(html.Div(id="crew-scorecard-container"), md=12),
+            ], className="mt-3"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-sites-per-hour"), md=6),
+                dbc.Col(dcc.Graph(id="chart-transition-time"), md=6),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-route-timeline"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-pace-consistency"), md=6),
+                dbc.Col(dcc.Graph(id="chart-top-locations"), md=6),
+            ]),
         ]),
         dbc.Tab(label="Deployments", tab_id="tab-deployments", children=[
+            html.Div([
+                html.H4("Deployments", className="mb-1"),
+                html.P("Compare crew performance across deployment periods with timeline and trend analysis.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
             dbc.Row([
                 dbc.Col(
                     dbc.Button("Download Report", id="btn-download-deployment-pdf",
@@ -587,7 +608,7 @@ main_content = dbc.Tabs(
                     width="auto",
                 ),
                 dcc.Download(id="download-deployment-pdf"),
-            ], className="mt-3 mb-2 ms-1"),
+            ], className="mb-2 ms-1"),
             dbc.Row([
                 dbc.Col(html.Div(id="deployment-summary-container"), md=12),
             ]),
@@ -606,21 +627,18 @@ main_content = dbc.Tabs(
                 dbc.Col(dcc.Graph(id="chart-deployment-sites-heatmap"), md=6),
             ]),
         ]),
-        dbc.Tab(label="Crew Metrics", tab_id="tab-crew", children=[
+        dbc.Tab(label="Data Quality", tab_id="tab-quality", children=[
+            html.Div([
+                html.H4("Data Quality", className="mb-1"),
+                html.P("Inspect raw data, noise filtering results, and message-level details.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
             dbc.Row([
-                dbc.Col(html.Div(id="crew-scorecard-container"), md=12),
+                dbc.Col(dcc.Graph(id="chart-quality"), md=12),
+            ]),
+            dbc.Row([
+                dbc.Col(html.Div(id="data-table-container"), md=12),
             ], className="mt-3"),
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-sites-per-hour"), md=6),
-                dbc.Col(dcc.Graph(id="chart-transition-time"), md=6),
-            ]),
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-route-timeline"), md=12),
-            ]),
-            dbc.Row([
-                dbc.Col(dcc.Graph(id="chart-pace-consistency"), md=6),
-                dbc.Col(dcc.Graph(id="chart-top-locations"), md=6),
-            ]),
         ]),
     ],
 )
@@ -764,81 +782,102 @@ def _build_sidebar():
             dbc.CardHeader(html.H5("Filters", className="mb-0")),
             dbc.CardBody(
                 [
-                    html.Label("Chat Groups", className="fw-bold mb-1"),
-                    dcc.Dropdown(
-                        id="filter-chats",
-                        options=[{"label": c, "value": c} for c in ALL_CHATS],
-                        value=ALL_CHATS,
-                        multi=True,
-                        placeholder="Select chats...",
-                        className="mb-3",
-                    ),
-                    html.Label("Senders", className="fw-bold mb-1"),
-                    dcc.Dropdown(
-                        id="filter-senders",
-                        options=[{"label": s, "value": s}
-                                 for s in ALL_SENDERS_RESOLVED],
-                        value=ALL_SENDERS_RESOLVED,
-                        multi=True,
-                        placeholder="Select senders...",
-                        className="mb-3",
-                    ),
-                    html.Label("Message Type", className="fw-bold mb-1"),
-                    dbc.Checklist(
-                        id="filter-types",
-                        options=[{"label": t.title(), "value": t}
-                                 for t in ALL_TYPES],
-                        value=ALL_TYPES,
-                        inline=True,
-                        className="mb-3",
-                    ),
-                    html.Label("Time Range (hour)", className="fw-bold mb-1"),
-                    dcc.RangeSlider(
-                        id="filter-time",
-                        min=0, max=24, step=1,
-                        value=[0, 24],
-                        marks={h: f"{h % 12 or 12}{'a' if h < 12 else 'p'}"
-                               for h in range(0, 25, 3)},
-                        className="mb-3",
-                    ),
-                    html.Label("Data Quality", className="fw-bold mb-1"),
-                    dbc.RadioItems(
-                        id="filter-quality",
-                        options=[
-                            {"label": "Clean only", "value": "clean"},
-                            {"label": "All messages", "value": "all"},
-                            {"label": "Noise only", "value": "noise"},
+                    dbc.Accordion(
+                        [
+                            dbc.AccordionItem(
+                                [
+                                    html.Label("Chat Groups", className="fw-bold mb-1"),
+                                    dcc.Dropdown(
+                                        id="filter-chats",
+                                        options=[{"label": c, "value": c} for c in ALL_CHATS],
+                                        value=ALL_CHATS,
+                                        multi=True,
+                                        placeholder="Select chats...",
+                                        className="mb-3",
+                                    ),
+                                    html.Label("Senders", className="fw-bold mb-1"),
+                                    dcc.Dropdown(
+                                        id="filter-senders",
+                                        options=[{"label": s, "value": s}
+                                                 for s in ALL_SENDERS_RESOLVED],
+                                        value=ALL_SENDERS_RESOLVED,
+                                        multi=True,
+                                        placeholder="Select senders...",
+                                        className="mb-3",
+                                    ),
+                                    dbc.Switch(
+                                        id="filter-resolved",
+                                        label="Use resolved senders",
+                                        value=True,
+                                        className="mb-1",
+                                    ),
+                                ],
+                                title="People & Chats",
+                            ),
+                            dbc.AccordionItem(
+                                [
+                                    html.Label("Time Range (hour)", className="fw-bold mb-1"),
+                                    dcc.RangeSlider(
+                                        id="filter-time",
+                                        min=0, max=24, step=1,
+                                        value=[0, 24],
+                                        marks={h: f"{h % 12 or 12}{'a' if h < 12 else 'p'}"
+                                               for h in range(0, 25, 3)},
+                                        className="mb-3",
+                                    ),
+                                    html.Label("Date Range", className="fw-bold mb-1"),
+                                    dcc.DatePickerRange(
+                                        id="filter-dates",
+                                        min_date_allowed=DATE_MIN,
+                                        max_date_allowed=DATE_MAX,
+                                        start_date=DATE_MIN,
+                                        end_date=DATE_MAX,
+                                        display_format="YYYY-MM-DD",
+                                        className="mb-3",
+                                        style={"fontSize": "12px"},
+                                    ),
+                                    html.Label("Deployment", className="fw-bold mb-1"),
+                                    dcc.Dropdown(
+                                        id="filter-deployment",
+                                        options=[{"label": d, "value": d} for d in ALL_DEPLOYMENTS],
+                                        value=ALL_DEPLOYMENTS,
+                                        multi=True,
+                                        placeholder="Select deployments...",
+                                        className="mb-1",
+                                    ),
+                                ],
+                                title="Time & Dates",
+                            ),
+                            dbc.AccordionItem(
+                                [
+                                    html.Label("Message Type", className="fw-bold mb-1"),
+                                    dbc.Checklist(
+                                        id="filter-types",
+                                        options=[{"label": t.title(), "value": t}
+                                                 for t in ALL_TYPES],
+                                        value=ALL_TYPES,
+                                        inline=True,
+                                        className="mb-3",
+                                    ),
+                                    html.Label("Data Quality", className="fw-bold mb-1"),
+                                    dbc.RadioItems(
+                                        id="filter-quality",
+                                        options=[
+                                            {"label": "Clean only", "value": "clean"},
+                                            {"label": "All messages", "value": "all"},
+                                            {"label": "Noise only", "value": "noise"},
+                                        ],
+                                        value="clean",
+                                        className="mb-1",
+                                    ),
+                                ],
+                                title="Message Filters",
+                            ),
                         ],
-                        value="clean",
+                        always_open=True,
+                        active_item=["item-0"],
                         className="mb-3",
                     ),
-                    dbc.Switch(
-                        id="filter-resolved",
-                        label="Use resolved senders",
-                        value=True,
-                        className="mb-3",
-                    ),
-                    html.Label("Date Range", className="fw-bold mb-1"),
-                    dcc.DatePickerRange(
-                        id="filter-dates",
-                        min_date_allowed=DATE_MIN,
-                        max_date_allowed=DATE_MAX,
-                        start_date=DATE_MIN,
-                        end_date=DATE_MAX,
-                        display_format="YYYY-MM-DD",
-                        className="mb-3",
-                        style={"fontSize": "12px"},
-                    ),
-                    html.Label("Deployment", className="fw-bold mb-1"),
-                    dcc.Dropdown(
-                        id="filter-deployment",
-                        options=[{"label": d, "value": d} for d in ALL_DEPLOYMENTS],
-                        value=ALL_DEPLOYMENTS,
-                        multi=True,
-                        placeholder="Select deployments...",
-                        className="mb-3",
-                    ),
-                    html.Hr(),
                     html.Div(id="summary-stats"),
                 ],
                 style={"overflowY": "auto", "maxHeight": "85vh"},
@@ -853,6 +892,7 @@ def serve_layout():
     return dbc.Container(
         [
             upload_section,
+            html.Div(id="kpi-bar", className="mb-2"),
             dbc.Row(
                 [
                     dbc.Col(_build_sidebar(), md=3, className="pe-0"),
@@ -1185,19 +1225,18 @@ def chart_sender_chat(chats, senders, quality, msg_types, time_range,
 
     counts = (df_valid.groupby([scol, "chat"])
               .size().reset_index(name="count"))
-    fig = px.scatter(
-        counts, x="chat", y=scol, size="count", color="count",
-        text="count",
+    fig = px.bar(
+        counts, x="chat", y="count", color=scol,
+        text="count", barmode="group",
         title="Sender × Chat Participation",
         labels={"count": "Messages", "chat": "Chat", scol: "Sender"},
-        size_max=40,
-        color_continuous_scale="Blues",
     )
-    fig.update_traces(textposition="top center", textfont_size=10)
+    fig.update_traces(textposition="outside", textfont_size=10)
     fig.update_layout(
         margin=dict(l=10, r=10, t=40, b=10),
         height=400,
         xaxis_tickangle=-30,
+        legend=dict(font=dict(size=10)),
     )
     return fig
 
@@ -2819,6 +2858,323 @@ def download_deployment_report(n_clicks, chats, senders, quality, msg_types,
 </html>"""
 
     return dcc.send_bytes(html_content.encode("utf-8"), filename)
+
+
+# ── KPI Bar Callback ─────────────────────────────────────────────────────────
+
+@app.callback(Output("kpi-bar", "children"), FILTER_INPUTS)
+def update_kpi_cards(chats, senders, quality, msg_types, time_range,
+                     use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    scol = _sender_col(use_resolved)
+
+    total_msgs = len(df)
+    active_crews = df["chat"].nunique()
+
+    visits_df = _build_site_visits(df, "chat")
+    ds = _build_daily_summary(df, scol)
+
+    total_sites = len(visits_df)
+    avg_sites_hr = 0.0
+    avg_trans = 0.0
+    if not visits_df.empty:
+        sc = _build_crew_scorecard(visits_df, ds)
+        if not sc.empty:
+            avg_sites_hr = sc["avg_sites_per_hour"].mean()
+            avg_trans = sc["avg_transition_min"].mean()
+
+    avg_first_str = "N/A"
+    if not ds.empty:
+        avg_first = ds["first_hour"].mean()
+        fh = int(avg_first)
+        fm = int((avg_first - fh) * 60)
+        period = "AM" if fh < 12 else "PM"
+        dh = fh % 12 or 12
+        avg_first_str = f"{dh}:{fm:02d} {period}"
+
+    kpi_data = [
+        ("Total Messages", f"{total_msgs:,}", "#3498db"),
+        ("Active Crews", str(active_crews), "#2ecc71"),
+        ("Avg Sites/Hour", f"{avg_sites_hr:.1f}", "#e67e22"),
+        ("Avg First Report", avg_first_str, "#9b59b6"),
+        ("Total Sites", f"{total_sites:,}", "#1abc9c"),
+        ("Avg Transition", f"{avg_trans:.1f} min", "#e74c3c"),
+    ]
+
+    cards = []
+    for label, value, color in kpi_data:
+        cards.append(dbc.Col(
+            dbc.Card(
+                dbc.CardBody([
+                    html.H3(value, className="mb-0 fw-bold text-center",
+                            style={"fontSize": "1.5rem"}),
+                    html.P(label, className="text-muted text-center mb-0",
+                           style={"fontSize": "12px"}),
+                ], className="py-2 px-2"),
+                style={"borderTop": f"3px solid {color}"},
+                className="shadow-sm",
+            ),
+            md=2, sm=4, xs=6, className="mb-2",
+        ))
+
+    return dbc.Row(cards, className="g-2")
+
+
+# ── Productivity: Daily Productivity Score ───────────────────────────────────
+
+def _build_daily_productivity_score(df, scol):
+    ds = _build_daily_summary(df, scol)
+    visits_df = _build_site_visits(df, scol)
+    if ds.empty or visits_df.empty:
+        return pd.DataFrame()
+
+    site_counts = (visits_df.groupby(["sender", "date"])
+                   .size().reset_index(name="sites_visited"))
+    site_counts["date"] = pd.to_datetime(site_counts["date"])
+
+    active_hrs = []
+    for (sender, d), day_grp in visits_df.groupby(
+            ["sender", visits_df["date"].dt.date]):
+        hrs = _compute_active_hours(day_grp)
+        active_hrs.append({
+            "sender": sender,
+            "date": pd.Timestamp(d),
+            "active_hrs": hrs,
+        })
+    active_df = pd.DataFrame(active_hrs) if active_hrs else pd.DataFrame(
+        columns=["sender", "date", "active_hrs"])
+
+    ds["date"] = pd.to_datetime(ds["date"])
+    merged = ds.merge(site_counts, on=["sender", "date"], how="left")
+    merged["sites_visited"] = merged["sites_visited"].fillna(0).astype(int)
+
+    if not active_df.empty:
+        merged = merged.merge(active_df, on=["sender", "date"], how="left")
+        merged["active_hrs"] = merged["active_hrs"].fillna(1 / 60)
+    else:
+        merged["active_hrs"] = 1 / 60
+
+    merged["sites_per_hour"] = merged["sites_visited"] / merged["active_hrs"]
+
+    merged["punctuality_score"] = merged["first_hour"].apply(
+        lambda h: max(0, min(100, 100 - (h - 7) * 50)) if h >= 7 else 100
+    )
+
+    max_sph = merged["sites_per_hour"].max()
+    if max_sph > 0:
+        merged["pace_score"] = (merged["sites_per_hour"] / max_sph * 100).clip(0, 100)
+    else:
+        merged["pace_score"] = 0.0
+
+    avg_sites = merged["sites_visited"].mean()
+    if avg_sites > 0:
+        merged["coverage"] = (merged["sites_visited"] / avg_sites * 100).clip(0, 100)
+    else:
+        merged["coverage"] = 0.0
+
+    merged["productivity_score"] = (
+        0.5 * merged["pace_score"]
+        + 0.3 * merged["punctuality_score"]
+        + 0.2 * merged["coverage"]
+    ).round(1)
+
+    result = merged[["sender", "date", "sites_visited", "sites_per_hour",
+                      "first_hour", "punctuality_score", "pace_score",
+                      "productivity_score"]].copy()
+    result["date"] = result["date"].dt.strftime("%Y-%m-%d")
+    result["sites_per_hour"] = result["sites_per_hour"].round(1)
+    result["first_hour"] = result["first_hour"].round(2)
+    result["punctuality_score"] = result["punctuality_score"].round(0).astype(int)
+    result["pace_score"] = result["pace_score"].round(0).astype(int)
+    return result
+
+
+@app.callback(Output("productivity-score-container", "children"), FILTER_INPUTS)
+def update_productivity_score(chats, senders, quality, msg_types, time_range,
+                              use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    scol = _sender_col(use_resolved)
+    ps = _build_daily_productivity_score(df, scol)
+    if ps.empty:
+        return html.P("No productivity data for current filters",
+                       className="text-muted p-3")
+
+    ps_display = ps.rename(columns={
+        "sender": "Sender", "date": "Date", "sites_visited": "Sites",
+        "sites_per_hour": "Sites/Hr", "first_hour": "First Hour",
+        "punctuality_score": "Punctuality", "pace_score": "Pace",
+        "productivity_score": "Score",
+    })
+
+    table = dash_table.DataTable(
+        data=ps_display.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in ps_display.columns],
+        filter_action="native",
+        sort_action="native",
+        sort_mode="multi",
+        page_size=20,
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+        style_header={
+            "backgroundColor": "#2c3e50", "color": "white", "fontWeight": "bold",
+        },
+        style_data_conditional=[
+            {"if": {"filter_query": "{Score} >= 70"},
+             "backgroundColor": "#eafaf1"},
+            {"if": {"filter_query": "{Score} >= 40 && {Score} < 70"},
+             "backgroundColor": "#fef9e7"},
+            {"if": {"filter_query": "{Score} < 40"},
+             "backgroundColor": "#fde8e8", "color": "#c0392b"},
+        ],
+    )
+    return html.Div([
+        html.H5("Daily Productivity Score", className="mb-2"),
+        table,
+    ])
+
+
+# ── Productivity: Crew Leaderboard ───────────────────────────────────────────
+
+@app.callback(Output("crew-leaderboard-container", "children"), FILTER_INPUTS)
+def update_crew_leaderboard(chats, senders, quality, msg_types, time_range,
+                            use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    scol = _sender_col(use_resolved)
+    ps = _build_daily_productivity_score(df, scol)
+    if ps.empty:
+        return html.P("No leaderboard data for current filters",
+                       className="text-muted p-3")
+
+    agg = ps.groupby("sender").agg(
+        avg_score=("productivity_score", "mean"),
+        best_day=("productivity_score", "max"),
+        days=("date", "count"),
+    ).reset_index()
+
+    if len(ps["date"].unique()) >= 2:
+        dates_sorted = sorted(ps["date"].unique())
+        mid = len(dates_sorted) // 2
+        early_dates = set(dates_sorted[:mid])
+        late_dates = set(dates_sorted[mid:])
+        trends = []
+        for sender in agg["sender"]:
+            s_data = ps[ps["sender"] == sender]
+            early_avg = s_data[s_data["date"].isin(early_dates)]["productivity_score"].mean()
+            late_avg = s_data[s_data["date"].isin(late_dates)]["productivity_score"].mean()
+            if pd.isna(early_avg) or pd.isna(late_avg):
+                trends.append("─ stable")
+            elif late_avg - early_avg > 3:
+                trends.append("↑ improving")
+            elif early_avg - late_avg > 3:
+                trends.append("↓ declining")
+            else:
+                trends.append("─ stable")
+        agg["trend"] = trends
+    else:
+        agg["trend"] = "─ stable"
+
+    agg = agg.sort_values("avg_score", ascending=False).reset_index(drop=True)
+    agg.insert(0, "rank", range(1, len(agg) + 1))
+    agg["avg_score"] = agg["avg_score"].round(1)
+    agg["best_day"] = agg["best_day"].round(1)
+
+    lb_display = agg.rename(columns={
+        "rank": "Rank", "sender": "Crew", "avg_score": "Avg Score",
+        "best_day": "Best Day", "trend": "Trend", "days": "Days",
+    })
+
+    table = dash_table.DataTable(
+        data=lb_display.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in lb_display.columns],
+        sort_action="native",
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+        style_header={
+            "backgroundColor": "#2c3e50", "color": "white", "fontWeight": "bold",
+        },
+        style_data_conditional=[
+            {"if": {"filter_query": "{Avg Score} >= 70"},
+             "backgroundColor": "#eafaf1"},
+            {"if": {"filter_query": "{Avg Score} >= 40 && {Avg Score} < 70"},
+             "backgroundColor": "#fef9e7"},
+            {"if": {"filter_query": "{Avg Score} < 40"},
+             "backgroundColor": "#fde8e8", "color": "#c0392b"},
+        ],
+    )
+    return html.Div([
+        html.H5("Crew Leaderboard", className="mb-2"),
+        table,
+    ])
+
+
+# ── Productivity: Idle Time Detection ────────────────────────────────────────
+
+def _build_idle_gaps(df, scol, threshold_min=45):
+    df_valid = df[(df[scol] != "") & df["time"].notna() & df["msg_date"].notna()].copy()
+    if df_valid.empty:
+        return pd.DataFrame()
+
+    df_valid = df_valid.sort_values([scol, "msg_date", "time"])
+    rows = []
+    for sender, grp in df_valid.groupby(scol):
+        for d, day_grp in grp.groupby(grp["msg_date"].dt.date):
+            times = day_grp["time"].sort_values()
+            if len(times) < 2:
+                continue
+            diffs = times.diff().dropna()
+            for idx, gap in diffs.items():
+                gap_min = gap.total_seconds() / 60.0
+                if gap_min >= threshold_min:
+                    gap_end_time = times.loc[idx]
+                    gap_start_time = gap_end_time - gap
+                    rows.append({
+                        "sender": sender,
+                        "date": str(d),
+                        "gap_start": gap_start_time.strftime("%I:%M %p"),
+                        "gap_end": gap_end_time.strftime("%I:%M %p"),
+                        "gap_minutes": round(gap_min, 1),
+                    })
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["sender", "date", "gap_start", "gap_end", "gap_minutes"])
+
+
+@app.callback(Output("chart-idle-gaps", "figure"), FILTER_INPUTS)
+def chart_idle_gaps(chats, senders, quality, msg_types, time_range,
+                    use_resolved, date_start, date_end, deployments):
+    df = _get_df(chats, senders, quality, msg_types, time_range, use_resolved,
+                 date_start, date_end, deployments)
+    scol = _sender_col(use_resolved)
+    gaps = _build_idle_gaps(df, scol)
+    if gaps.empty:
+        return _empty_fig("Idle Time Detection")
+
+    incident_counts = gaps.groupby("sender").agg(
+        incidents=("gap_minutes", "size"),
+        avg_gap=("gap_minutes", "mean"),
+        max_gap=("gap_minutes", "max"),
+    ).reset_index().sort_values("incidents")
+
+    fig = px.bar(
+        incident_counts, y="sender", x="incidents", orientation="h",
+        text="incidents",
+        title="Idle Time Incidents per Crew (gaps > 45 min)",
+        labels={"incidents": "Idle Incidents", "sender": "Crew"},
+        color="avg_gap",
+        color_continuous_scale="OrRd",
+        hover_data={"avg_gap": ":.1f", "max_gap": ":.1f"},
+    )
+    fig.update_traces(textposition="outside", textfont_size=11)
+    fig.update_layout(
+        margin=dict(l=10, r=60, t=40, b=10),
+        height=400,
+        yaxis={"categoryorder": "total ascending"},
+        coloraxis_colorbar_title="Avg Gap<br>(min)",
+    )
+    return fig
 
 
 # ── Helper: empty figure ─────────────────────────────────────────────────────
