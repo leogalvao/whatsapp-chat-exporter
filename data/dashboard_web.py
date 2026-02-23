@@ -9,6 +9,7 @@ Usage:
     python3 dashboard_web.py
 """
 
+import base64
 import glob
 import json
 import os
@@ -258,13 +259,12 @@ def _discover_json_files(data_dir):
     """
     paths = []
 
-    # 1. Archive exports
-    for p in glob.glob(os.path.join(data_dir, "archive", "whatsapp_*.json")):
+    # 1. Archive exports (all JSON files in archive/)
+    for p in glob.glob(os.path.join(data_dir, "archive", "*.json")):
         paths.append(p)
 
     # 2. Subfolder exports (recursive)
     for root, dirs, files in os.walk(data_dir):
-        # Skip excluded dirs
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and d != "archive"]
         for fn in files:
             if fn.endswith(".json"):
@@ -490,114 +490,6 @@ app.title = "WhatsApp Chat Dashboard"
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
-sidebar = dbc.Card(
-    [
-        dbc.CardHeader(html.H5("Filters", className="mb-0")),
-        dbc.CardBody(
-            [
-                # Chat groups
-                html.Label("Chat Groups", className="fw-bold mb-1"),
-                dcc.Dropdown(
-                    id="filter-chats",
-                    options=[{"label": c, "value": c} for c in ALL_CHATS],
-                    value=ALL_CHATS,
-                    multi=True,
-                    placeholder="Select chats...",
-                    className="mb-3",
-                ),
-
-                # Senders
-                html.Label("Senders", className="fw-bold mb-1"),
-                dcc.Dropdown(
-                    id="filter-senders",
-                    options=[{"label": s, "value": s}
-                             for s in ALL_SENDERS_RESOLVED],
-                    value=ALL_SENDERS_RESOLVED,
-                    multi=True,
-                    placeholder="Select senders...",
-                    className="mb-3",
-                ),
-
-                # Message type
-                html.Label("Message Type", className="fw-bold mb-1"),
-                dbc.Checklist(
-                    id="filter-types",
-                    options=[{"label": t.title(), "value": t}
-                             for t in ALL_TYPES],
-                    value=ALL_TYPES,
-                    inline=True,
-                    className="mb-3",
-                ),
-
-                # Time range slider
-                html.Label("Time Range (hour)", className="fw-bold mb-1"),
-                dcc.RangeSlider(
-                    id="filter-time",
-                    min=0, max=24, step=1,
-                    value=[0, 24],
-                    marks={h: f"{h % 12 or 12}{'a' if h < 12 else 'p'}"
-                           for h in range(0, 25, 3)},
-                    className="mb-3",
-                ),
-
-                # Quality filter
-                html.Label("Data Quality", className="fw-bold mb-1"),
-                dbc.RadioItems(
-                    id="filter-quality",
-                    options=[
-                        {"label": "Clean only", "value": "clean"},
-                        {"label": "All messages", "value": "all"},
-                        {"label": "Noise only", "value": "noise"},
-                    ],
-                    value="clean",
-                    className="mb-3",
-                ),
-
-                # Resolved senders toggle
-                dbc.Switch(
-                    id="filter-resolved",
-                    label="Use resolved senders",
-                    value=True,
-                    className="mb-3",
-                ),
-
-                # Date range picker
-                html.Label("Date Range", className="fw-bold mb-1"),
-                dcc.DatePickerRange(
-                    id="filter-dates",
-                    min_date_allowed=DATE_MIN,
-                    max_date_allowed=DATE_MAX,
-                    start_date=DATE_MIN,
-                    end_date=DATE_MAX,
-                    display_format="YYYY-MM-DD",
-                    className="mb-3",
-                    style={"fontSize": "12px"},
-                ),
-
-                # Deployment filter
-                html.Label("Deployment", className="fw-bold mb-1"),
-                dcc.Dropdown(
-                    id="filter-deployment",
-                    options=[{"label": d, "value": d} for d in ALL_DEPLOYMENTS],
-                    value=ALL_DEPLOYMENTS,
-                    multi=True,
-                    placeholder="Select deployments...",
-                    className="mb-3",
-                ),
-
-                html.Hr(),
-
-                # Summary stats card
-                html.Div(id="summary-stats"),
-            ],
-            style={"overflowY": "auto", "maxHeight": "85vh"},
-        ),
-    ],
-    className="shadow-sm",
-    style={"height": "100vh"},
-)
-
-
 # ── Main content (tabs) ─────────────────────────────────────────────────────
 
 main_content = dbc.Tabs(
@@ -704,21 +596,253 @@ main_content = dbc.Tabs(
 )
 
 
-# ── App layout ───────────────────────────────────────────────────────────────
+# ── Upload component ─────────────────────────────────────────────────────────
 
-app.layout = dbc.Container(
-    [
-        dbc.Row(
-            [
-                dbc.Col(sidebar, md=3, className="pe-0"),
-                dbc.Col(main_content, md=9, className="ps-3"),
-            ],
-            className="g-0",
-        ),
-    ],
-    fluid=True,
-    className="p-2",
+upload_section = dbc.Card(
+    dbc.CardBody([
+        dbc.Row([
+            dbc.Col([
+                dcc.Upload(
+                    id="upload-data",
+                    children=html.Div([
+                        html.I(className="bi bi-cloud-upload me-2"),
+                        "Drag & drop WhatsApp JSON exports here, or ",
+                        html.A("click to browse", className="text-primary fw-bold"),
+                    ]),
+                    style={
+                        "borderWidth": "2px",
+                        "borderStyle": "dashed",
+                        "borderRadius": "8px",
+                        "borderColor": "#adb5bd",
+                        "textAlign": "center",
+                        "padding": "20px",
+                        "cursor": "pointer",
+                        "backgroundColor": "#f8f9fa",
+                    },
+                    multiple=True,
+                    accept=".json",
+                ),
+            ], md=10),
+            dbc.Col([
+                html.Div(id="upload-status", className="mt-2 text-center"),
+            ], md=2, className="d-flex align-items-center"),
+        ]),
+    ]),
+    className="mb-2 shadow-sm",
 )
+
+
+# ── App layout (function so it refreshes after data upload) ─────────────────
+
+def _build_sidebar():
+    return dbc.Card(
+        [
+            dbc.CardHeader(html.H5("Filters", className="mb-0")),
+            dbc.CardBody(
+                [
+                    html.Label("Chat Groups", className="fw-bold mb-1"),
+                    dcc.Dropdown(
+                        id="filter-chats",
+                        options=[{"label": c, "value": c} for c in ALL_CHATS],
+                        value=ALL_CHATS,
+                        multi=True,
+                        placeholder="Select chats...",
+                        className="mb-3",
+                    ),
+                    html.Label("Senders", className="fw-bold mb-1"),
+                    dcc.Dropdown(
+                        id="filter-senders",
+                        options=[{"label": s, "value": s}
+                                 for s in ALL_SENDERS_RESOLVED],
+                        value=ALL_SENDERS_RESOLVED,
+                        multi=True,
+                        placeholder="Select senders...",
+                        className="mb-3",
+                    ),
+                    html.Label("Message Type", className="fw-bold mb-1"),
+                    dbc.Checklist(
+                        id="filter-types",
+                        options=[{"label": t.title(), "value": t}
+                                 for t in ALL_TYPES],
+                        value=ALL_TYPES,
+                        inline=True,
+                        className="mb-3",
+                    ),
+                    html.Label("Time Range (hour)", className="fw-bold mb-1"),
+                    dcc.RangeSlider(
+                        id="filter-time",
+                        min=0, max=24, step=1,
+                        value=[0, 24],
+                        marks={h: f"{h % 12 or 12}{'a' if h < 12 else 'p'}"
+                               for h in range(0, 25, 3)},
+                        className="mb-3",
+                    ),
+                    html.Label("Data Quality", className="fw-bold mb-1"),
+                    dbc.RadioItems(
+                        id="filter-quality",
+                        options=[
+                            {"label": "Clean only", "value": "clean"},
+                            {"label": "All messages", "value": "all"},
+                            {"label": "Noise only", "value": "noise"},
+                        ],
+                        value="clean",
+                        className="mb-3",
+                    ),
+                    dbc.Switch(
+                        id="filter-resolved",
+                        label="Use resolved senders",
+                        value=True,
+                        className="mb-3",
+                    ),
+                    html.Label("Date Range", className="fw-bold mb-1"),
+                    dcc.DatePickerRange(
+                        id="filter-dates",
+                        min_date_allowed=DATE_MIN,
+                        max_date_allowed=DATE_MAX,
+                        start_date=DATE_MIN,
+                        end_date=DATE_MAX,
+                        display_format="YYYY-MM-DD",
+                        className="mb-3",
+                        style={"fontSize": "12px"},
+                    ),
+                    html.Label("Deployment", className="fw-bold mb-1"),
+                    dcc.Dropdown(
+                        id="filter-deployment",
+                        options=[{"label": d, "value": d} for d in ALL_DEPLOYMENTS],
+                        value=ALL_DEPLOYMENTS,
+                        multi=True,
+                        placeholder="Select deployments...",
+                        className="mb-3",
+                    ),
+                    html.Hr(),
+                    html.Div(id="summary-stats"),
+                ],
+                style={"overflowY": "auto", "maxHeight": "85vh"},
+            ),
+        ],
+        className="shadow-sm",
+        style={"height": "100vh"},
+    )
+
+
+def serve_layout():
+    return dbc.Container(
+        [
+            upload_section,
+            dbc.Row(
+                [
+                    dbc.Col(_build_sidebar(), md=3, className="pe-0"),
+                    dbc.Col(main_content, md=9, className="ps-3"),
+                ],
+                className="g-0",
+            ),
+            dcc.Location(id="page-reload", refresh=True),
+        ],
+        fluid=True,
+        className="p-2",
+    )
+
+
+app.layout = serve_layout
+
+
+# ── Upload callback ──────────────────────────────────────────────────────────
+
+def _reload_global_data():
+    """Reload all global data variables after new files are uploaded."""
+    global DF_ALL, ALL_CHATS, ALL_SENDERS, ALL_SENDERS_RESOLVED, ALL_TYPES
+    global NOISE_TYPES, DATE_MIN, DATE_MAX, ALL_DATES, ALL_DEPLOYMENTS_LIST
+    global ALL_DEPLOYMENTS, _date_to_deployment
+    global TOTAL_MSGS, CLEAN_MSGS, NOISE_MSGS, NUM_CHATS, NUM_SENDERS
+
+    DF_ALL = load_all_data(DATA_DIR)
+    ALL_CHATS = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
+    ALL_SENDERS = sorted(
+        DF_ALL[DF_ALL["sender"] != ""]["sender"].unique()) if not DF_ALL.empty else []
+    ALL_SENDERS_RESOLVED = sorted(
+        DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique()) if not DF_ALL.empty else []
+    ALL_TYPES = sorted(DF_ALL["type"].unique()) if not DF_ALL.empty else []
+    NOISE_TYPES = sorted(DF_ALL["noise_type"].unique()) if not DF_ALL.empty else []
+
+    _date_col = DF_ALL["msg_date"].dropna()
+    if _date_col.empty:
+        _date_col = DF_ALL["export_date"].dropna()
+    DATE_MIN = _date_col.min().date() if not _date_col.empty else date(2026, 2, 8)
+    DATE_MAX = _date_col.max().date() if not _date_col.empty else date(2026, 2, 8)
+    ALL_DATES = sorted(DF_ALL["msg_date"].dropna().dt.date.unique()) if not DF_ALL.empty else []
+
+    ALL_DEPLOYMENTS_LIST = _compute_deployments(ALL_DATES)
+    _date_to_deployment = {}
+    for _dep in ALL_DEPLOYMENTS_LIST:
+        _d = _dep["start_date"]
+        while _d <= _dep["end_date"]:
+            _date_to_deployment[_d] = _dep["label"]
+            _d += timedelta(days=1)
+
+    if not DF_ALL.empty:
+        DF_ALL["deployment"] = DF_ALL["msg_date"].dt.date.map(_date_to_deployment)
+    ALL_DEPLOYMENTS = [dep["label"] for dep in ALL_DEPLOYMENTS_LIST]
+
+    TOTAL_MSGS = len(DF_ALL)
+    CLEAN_MSGS = len(DF_ALL[DF_ALL["noise_type"] == "clean"]) if not DF_ALL.empty else 0
+    NOISE_MSGS = TOTAL_MSGS - CLEAN_MSGS
+    NUM_CHATS = DF_ALL["chat"].nunique() if not DF_ALL.empty else 0
+    NUM_SENDERS = len(ALL_SENDERS_RESOLVED)
+
+
+@app.callback(
+    Output("upload-status", "children"),
+    Output("page-reload", "href"),
+    Input("upload-data", "contents"),
+    State("upload-data", "filename"),
+    prevent_initial_call=True,
+)
+def handle_upload(contents_list, filenames_list):
+    if not contents_list:
+        from dash import no_update
+        return no_update, no_update
+
+    archive_dir = os.path.join(DATA_DIR, "archive")
+    os.makedirs(archive_dir, exist_ok=True)
+
+    saved = []
+    errors = []
+    for content, filename in zip(contents_list, filenames_list):
+        try:
+            content_type, content_string = content.split(",", 1)
+            decoded = base64.b64decode(content_string)
+            data = json.loads(decoded.decode("utf-8"))
+            if "exportInfo" not in data or "messages" not in data:
+                errors.append(f"{filename}: not a valid WhatsApp export")
+                continue
+            safe_name = os.path.basename(filename)
+            safe_name = re.sub(r"[^\w.\-]", "_", safe_name)
+            if not safe_name.endswith(".json"):
+                safe_name += ".json"
+            save_path = os.path.join(archive_dir, safe_name)
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            saved.append(safe_name)
+        except Exception as e:
+            errors.append(f"{filename}: {str(e)[:50]}")
+
+    _reload_global_data()
+
+    msgs = []
+    if saved:
+        msgs.append(html.Span(
+            f"Uploaded {len(saved)} file(s). ",
+            className="text-success fw-bold"
+        ))
+    if errors:
+        msgs.append(html.Span(
+            f"{len(errors)} error(s). ",
+            className="text-danger"
+        ))
+
+    if saved:
+        return html.Div(msgs), "/"
+    return html.Div(msgs), None
 
 
 # ── Shared filter inputs ─────────────────────────────────────────────────────
