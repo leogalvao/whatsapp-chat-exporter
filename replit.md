@@ -24,13 +24,21 @@ This project consists of two components:
 - dash, dash-bootstrap-components
 - plotly, pandas, numpy
 
+### Domain Model (Snow Removal)
+- `data/domain_model.py` - Standalone domain model module (no Dash dependencies)
+  - Job log builder, crew summary, route segments, deployment burndown
+  - Location type stats, traffic analysis, delay report, recall detection
+  - Trackable sender filtering
+- `data/config/snow_removal.json` - Configuration for deployment types, location types, expected service times, non-trackable senders, standard travel times
+
 ## Dashboard Structure
-The dashboard has 5 tabs:
+The dashboard has 6 tabs:
 1. **Overview** - Message volume, types, activity heatmap, sender participation, daily timeline
 2. **Productivity** - Daily productivity scores, crew leaderboard with rankings, first report times, reporting windows, idle time detection, daily message trends
 3. **Crew Analysis** - Per-sender metrics, message gaps, crew scorecards, sites/hour, transition times, route timelines, pace consistency, top locations
 4. **Deployments** - Deployment summary, timeline, cross-deployment comparison, performance trends, sites heatmap, downloadable HTML reports
-5. **Data Quality** - Noise filtering overview, raw message data table
+5. **Operations** - Routing Gantt chart, deployment burn-down (actual vs 12hr expected pace), location type performance, traffic analysis, delay report, recall summary
+6. **Data Quality** - Noise filtering overview, raw message data table
 
 ### Key Dashboard Features
 - **KPI Summary Bar**: Always-visible row of 6 metric cards (Total Messages, Active Crews, Avg Sites/Hour, Avg First Report, Total Sites, Avg Transition)
@@ -38,6 +46,10 @@ The dashboard has 5 tabs:
 - **Productivity Score**: Weighted composite (50% pace + 30% punctuality + 20% coverage) per crew per day
 - **Crew Leaderboard**: Ranked table with trend indicators (improving/declining/stable)
 - **Idle Time Detection**: Flags gaps > 45 minutes between consecutive messages
+- **Recall Detection**: Flags when crews return to previously-visited locations, tracks added time
+- **Location Type Auto-Detection**: Infers Sidewalk/Parking Lot from chat names
+- **Trackable Sender Filtering**: Excludes non-trackable senders from Operations KPIs
+- **Deployment Burn-Down**: Compares actual site completion pace vs expected (configurable, default 12hr)
 - **File Upload**: Drag-and-drop JSON files or upload entire folders
 - **Deployment Reports**: Downloadable HTML reports with all deployment charts
 
@@ -48,6 +60,15 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Snow Removal Operations integration
+  - Created domain model module (data/domain_model.py) with formalized entities
+  - Added configuration system (data/config/snow_removal.json)
+  - New Operations tab with 6 sections: Routing Gantt, Burn-Down, Location Type Performance, Traffic Analysis, Delay Report, Recall Summary
+  - Recall detection system flagging crews returning to previously-visited locations
+  - Trackable sender filtering applied to all Operations KPIs
+  - Route segments include actual start/end timestamps for accurate Gantt charts
+  - Burndown uses configurable expected_deployment_hours from config
+  - Export API includes recalls and location type stats
 - 2026-02-23: Major dashboard restructuring
   - Reorganized from 7 tabs to 5 (Overview, Productivity, Crew Analysis, Deployments, Data Quality)
   - Added KPI summary bar with 6 at-a-glance metric cards
