@@ -53,6 +53,12 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Crew-size-adjusted burn-down curves
+  - Burn-down expected pace now scaled by crew count per deployment
+  - Formula: adjusted_hours = expected_hours / crew_count (more crews = steeper expected curve)
+  - Crew count auto-detected from unique crews (chats) active in each deployment
+  - Legend shows crew count, total sites, and adjusted expected hours per deployment
+  - Enables fair comparison: same-size deployments with more crews expected to finish faster
 - 2026-02-23: Distance-based travel efficiency analysis
   - Haversine distance calculation between locations using registry coordinates
   - Route segments now include distance_km, estimated_travel_mins (25 km/h city speed), and travel_efficiency %

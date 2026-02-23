@@ -421,7 +421,13 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
     """Build deployment burndown data comparing actual vs expected pace.
 
     For each deployment, computes cumulative sites completed over time
-    against an expected linear pace.
+    against an expected linear pace scaled by crew count.  Larger crews
+    are expected to finish the same number of sites faster.
+
+    The expected pace is scaled by crew count:
+        adjusted_hours = expected_hours / crew_count
+        expected_at_t = min(total_sites, total_sites * elapsed / adjusted_hours)
+    More crews = shorter adjusted window = steeper expected curve.
 
     Args:
         job_logs_df: DataFrame output of build_job_logs.
@@ -431,17 +437,17 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
 
     Returns:
         DataFrame with columns: deployment, timestamp, cumulative_completed,
-        expected_completed, pct_complete.
+        expected_completed, pct_complete, crew_count.
     """
     cols = [
         "deployment", "timestamp", "cumulative_completed",
-        "expected_completed", "pct_complete",
+        "expected_completed", "pct_complete", "crew_count",
     ]
 
     if job_logs_df is None or job_logs_df.empty or not deployments_list:
         return _empty_df(cols)
 
-    expected_duration_hours = config.get("expected_deployment_hours", 12.0)
+    base_expected_hours = config.get("expected_deployment_hours", 12.0)
     rows = []
 
     for dep in deployments_list:
@@ -457,13 +463,19 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
         if pd.isna(start_time):
             continue
 
+        crew_count = dep_logs["crew"].nunique() if "crew" in dep_logs.columns else 1
+        crew_count = max(crew_count, 1)
+
+        adjusted_hours = base_expected_hours / crew_count
+
         for i, (_, row) in enumerate(dep_logs.iterrows(), 1):
             ts = row["picture_submitted_at"]
             if pd.isna(ts):
                 continue
             elapsed_hours = (ts - start_time).total_seconds() / 3600.0
-            expected = (
-                total_sites / expected_duration_hours * elapsed_hours
+            expected = min(
+                total_sites,
+                total_sites * elapsed_hours / adjusted_hours,
             )
             pct = (i / total_sites * 100.0) if total_sites > 0 else 0.0
             rows.append({
@@ -472,6 +484,7 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
                 "cumulative_completed": i,
                 "expected_completed": round(expected, 2),
                 "pct_complete": round(pct, 2),
+                "crew_count": crew_count,
             })
 
     if not rows:

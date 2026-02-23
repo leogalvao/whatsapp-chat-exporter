@@ -3832,21 +3832,28 @@ def chart_burndown(chats, senders, quality, msg_types, time_range,
         fig = go.Figure()
         for dep_label in burndown["deployment"].unique():
             dep_data = burndown[burndown["deployment"] == dep_label]
+            crew_count = int(dep_data["crew_count"].iloc[0]) if "crew_count" in dep_data.columns and not dep_data.empty else 1
+            total_sites = int(dep_data["cumulative_completed"].max()) if not dep_data.empty else 0
+            base_hrs = SNOW_CONFIG.get("expected_deployment_hours", 12.0)
+            adj_hrs = base_hrs / max(crew_count, 1)
             fig.add_trace(go.Scatter(
                 x=dep_data["timestamp"], y=dep_data["cumulative_completed"],
-                mode="lines+markers", name=f"{dep_label} (actual)",
+                mode="lines+markers",
+                name=f"{dep_label} actual ({crew_count} crews, {total_sites} sites)",
                 line=dict(dash="solid"),
             ))
             fig.add_trace(go.Scatter(
                 x=dep_data["timestamp"], y=dep_data["expected_completed"],
-                mode="lines", name=f"{dep_label} (expected)",
+                mode="lines",
+                name=f"{dep_label} expected ({adj_hrs:.1f}h adj.)",
                 line=dict(dash="dash"),
             ))
         fig.update_layout(
-            title="Deployment Burn-Down: Actual vs Expected",
+            title="Deployment Burn-Down: Actual vs Expected (crew-adjusted)",
             xaxis_title="Time", yaxis_title="Cumulative Sites Completed",
             margin=dict(l=10, r=10, t=40, b=10),
-            height=400,
+            height=450,
+            legend=dict(font=dict(size=11)),
         )
         return fig
     except Exception as e:
