@@ -4355,22 +4355,41 @@ def render_service_map(active_tab):
                 "#dcbeff", "#9A6324", "#800000", "#aaffc3", "#808000",
                 "#000075", "#ff4500", "#00ced1",
             ]
-            crew_set = set()
+
+            all_individual_crews = set()
             for r in locs_with_coords:
+                for field in ["crew_sidewalk", "crew_parking_lot"]:
+                    val = r.get(field, "")
+                    if val:
+                        for c in val.split(","):
+                            c = c.strip()
+                            if c:
+                                all_individual_crews.add(c)
+            all_individual_crews = sorted(all_individual_crews)
+            if not all_individual_crews:
+                all_individual_crews = ["Unassigned"]
+            indiv_color = {c: BOLD_COLORS[i % len(BOLD_COLORS)] for i, c in enumerate(all_individual_crews)}
+            indiv_color["Unassigned"] = "#888888"
+
+            def _primary_crew(r):
                 sw = r.get("crew_sidewalk", "")
                 pl = r.get("crew_parking_lot", "")
-                crew_set.add(sw if sw else (pl if pl else "Unassigned"))
-            crew_set = sorted(crew_set)
-            crew_color = {c: BOLD_COLORS[i % len(BOLD_COLORS)] for i, c in enumerate(crew_set)}
+                val = sw if sw else (pl if pl else "")
+                if not val:
+                    return "Unassigned"
+                return val.split(",")[0].strip()
 
-            for crew in crew_set:
-                crew_locs = [r for r in locs_with_coords
-                             if (r.get("crew_sidewalk", "") or r.get("crew_parking_lot", "") or "Unassigned") == crew]
+            crew_groups = {}
+            for r in locs_with_coords:
+                pc = _primary_crew(r)
+                crew_groups.setdefault(pc, []).append(r)
+
+            for crew in sorted(crew_groups.keys()):
+                crew_locs = crew_groups[crew]
                 lats = [float(r["lat"]) for r in crew_locs]
                 lons = [float(r["lon"]) for r in crew_locs]
-                names = [r.get("location_name", "") for r in crew_locs]
-                matched = [r.get("_matched_raw", r.get("matched_chat_location", "")) for r in crew_locs]
                 sizes = []
+                hovers = []
                 for r in crew_locs:
                     m = r.get("_matched_raw", "")
                     if not m:
@@ -4378,18 +4397,25 @@ def render_service_map(active_tab):
                         if mc and "(" in mc:
                             m = mc.split("(")[0].strip()
                     cnt = loc_counts.get(m, 1)
-                    sizes.append(max(8, min(30, 8 + cnt * 2)))
-                hovers = [
-                    f"{n}<br>Visits: {loc_counts.get(matched[i].split('(')[0].strip() if '(' in str(matched[i]) else matched[i], 0)}"
-                    for i, n in enumerate(names)
-                ]
+                    sizes.append(max(10, min(30, 8 + cnt * 2)))
+                    sw = r.get("crew_sidewalk", "")
+                    pl = r.get("crew_parking_lot", "")
+                    hover_parts = [f"<b>{r.get('location_name', '')}</b>"]
+                    hover_parts.append(f"Visits: {loc_counts.get(m, 0)}")
+                    if sw:
+                        hover_parts.append(f"Sidewalk: {sw}")
+                    if pl:
+                        hover_parts.append(f"Parking: {pl}")
+                    if not sw and not pl:
+                        hover_parts.append("Crew: Unassigned")
+                    hovers.append("<br>".join(hover_parts))
                 fig.add_trace(go.Scattermap(
                     lat=lats,
                     lon=lons,
                     mode="markers",
                     marker=dict(
                         size=sizes,
-                        color=crew_color[crew],
+                        color=indiv_color.get(crew, "#888888"),
                         opacity=0.95,
                     ),
                     text=hovers,
