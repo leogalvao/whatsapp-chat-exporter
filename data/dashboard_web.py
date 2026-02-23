@@ -23,7 +23,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 from flask import request as flask_request, jsonify as flask_jsonify
-from dash import Dash, Input, Output, State, callback_context, dash_table, dcc, html
+from dash import ALL, Dash, Input, Output, State, callback_context, dash_table, dcc, html
 import dash_bootstrap_components as dbc
 
 from domain_model import (
@@ -880,6 +880,67 @@ main_content = dbc.Tabs(
             dbc.Row([
                 dbc.Col(html.Div(id="data-table-container"), md=12),
             ], className="mt-3"),
+        ]),
+        dbc.Tab(label="Settings", tab_id="tab-settings", children=[
+            html.Div([
+                html.H4("Settings", className="mb-1"),
+                html.P("Configure crew location types and sender tracking. Changes are saved automatically and applied to all analytics.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
+            dbc.Row([
+                dbc.Col([
+                    html.H5("Crew Location Types", className="mb-2"),
+                    html.P("Assign each crew/chat group to Sidewalk or Parking Lot. 'Auto-detect' infers from the chat name.",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    html.Div(id="settings-crew-types-container"),
+                ], md=7),
+                dbc.Col([
+                    html.H5("Non-Trackable Senders", className="mb-2"),
+                    html.P("Check senders whose messages should NOT be counted in operations metrics (e.g. supervisors, admins).",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    html.Div(id="settings-non-trackable-container"),
+                ], md=5),
+            ]),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Button("Save Settings", id="settings-save-btn", color="primary",
+                               className="mt-3 me-2", n_clicks=0),
+                    html.Span(id="settings-save-status", className="ms-2 align-middle"),
+                ], md=12),
+            ], className="mt-2"),
+            html.Hr(className="my-3"),
+            dbc.Row([
+                dbc.Col([
+                    html.H5("Expected Deployment Duration", className="mb-2"),
+                    html.P("Hours expected for a full deployment (used for burn-down baseline).",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    dbc.InputGroup([
+                        dbc.Input(id="settings-expected-hours", type="number",
+                                  value=SNOW_CONFIG.get("expected_deployment_hours", 12.0),
+                                  min=1, max=48, step=0.5),
+                        dbc.InputGroupText("hours"),
+                    ], style={"maxWidth": "250px"}),
+                ], md=4),
+                dbc.Col([
+                    html.H5("Expected Service Times (minutes)", className="mb-2"),
+                    html.P("Average minutes to complete service at each location type.",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("Sidewalk", className="mb-1"),
+                            dbc.Input(id="settings-svc-sidewalk", type="number",
+                                      value=SNOW_CONFIG.get("expected_service_times", {}).get("Sidewalk", 30),
+                                      min=1, max=240, step=1),
+                        ], md=4),
+                        dbc.Col([
+                            dbc.Label("Parking Lot", className="mb-1"),
+                            dbc.Input(id="settings-svc-parking", type="number",
+                                      value=SNOW_CONFIG.get("expected_service_times", {}).get("Parking Lot", 45),
+                                      min=1, max=240, step=1),
+                        ], md=4),
+                    ]),
+                ], md=6),
+            ]),
         ]),
     ],
 )
@@ -3663,6 +3724,113 @@ def recall_summary(chats, senders, quality, msg_types, time_range,
             ], md=6),
         ]),
     ])
+
+
+# ── Settings Tab Callbacks ───────────────────────────────────────────────────
+
+@app.callback(
+    Output("settings-crew-types-container", "children"),
+    Input("main-tabs", "active_tab"),
+)
+def render_crew_type_settings(active_tab):
+    if active_tab != "tab-settings":
+        raise dash.exceptions.PreventUpdate
+    loc_types = SNOW_CONFIG.get("location_types", {})
+    rows = []
+    for chat in ALL_CHATS:
+        current = loc_types.get(chat, "")
+        auto = infer_location_type(chat)
+        auto_label = f"Auto-detect ({auto})"
+        rows.append(
+            dbc.Row([
+                dbc.Col(html.Span(chat, style={"fontSize": "13px"}), md=6),
+                dbc.Col(dcc.Dropdown(
+                    id={"type": "crew-type-dd", "chat": chat},
+                    options=[
+                        {"label": auto_label, "value": ""},
+                        {"label": "Sidewalk", "value": "Sidewalk"},
+                        {"label": "Parking Lot", "value": "Parking Lot"},
+                    ],
+                    value=current,
+                    clearable=False,
+                    style={"fontSize": "13px"},
+                ), md=6),
+            ], className="mb-1 align-items-center")
+        )
+    return html.Div(rows, style={"maxHeight": "500px", "overflowY": "auto"})
+
+
+@app.callback(
+    Output("settings-non-trackable-container", "children"),
+    Input("main-tabs", "active_tab"),
+)
+def render_non_trackable_settings(active_tab):
+    if active_tab != "tab-settings":
+        raise dash.exceptions.PreventUpdate
+    non_trackable = SNOW_CONFIG.get("non_trackable_senders", [])
+    items = []
+    for sender in ALL_SENDERS_RESOLVED:
+        items.append(
+            dbc.Checkbox(
+                id={"type": "non-track-cb", "sender": sender},
+                label=sender,
+                value=sender in non_trackable,
+                className="mb-1",
+                style={"fontSize": "13px"},
+            )
+        )
+    return html.Div(items, style={"maxHeight": "500px", "overflowY": "auto"})
+
+
+@app.callback(
+    Output("settings-save-status", "children"),
+    Input("settings-save-btn", "n_clicks"),
+    [State({"type": "crew-type-dd", "chat": ALL}, "value"),
+     State({"type": "crew-type-dd", "chat": ALL}, "id"),
+     State({"type": "non-track-cb", "sender": ALL}, "value"),
+     State({"type": "non-track-cb", "sender": ALL}, "id"),
+     State("settings-expected-hours", "value"),
+     State("settings-svc-sidewalk", "value"),
+     State("settings-svc-parking", "value")],
+    prevent_initial_call=True,
+)
+def save_settings(n_clicks, crew_values, crew_ids, track_values, track_ids,
+                  expected_hours, svc_sidewalk, svc_parking):
+    global SNOW_CONFIG
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+
+    loc_types = {}
+    if crew_ids and crew_values:
+        for cid, val in zip(crew_ids, crew_values):
+            if val:
+                loc_types[cid["chat"]] = val
+
+    non_trackable = []
+    if track_ids and track_values:
+        for tid, val in zip(track_ids, track_values):
+            if val:
+                non_trackable.append(tid["sender"])
+
+    SNOW_CONFIG["location_types"] = loc_types
+    SNOW_CONFIG["non_trackable_senders"] = non_trackable
+    if expected_hours is not None:
+        SNOW_CONFIG["expected_deployment_hours"] = float(expected_hours)
+    svc = SNOW_CONFIG.get("expected_service_times", {})
+    if svc_sidewalk is not None:
+        svc["Sidewalk"] = int(svc_sidewalk)
+    if svc_parking is not None:
+        svc["Parking Lot"] = int(svc_parking)
+    SNOW_CONFIG["expected_service_times"] = svc
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(SNOW_CONFIG, f, indent=2)
+        return html.Span("Settings saved!", style={"color": "green", "fontWeight": "bold"})
+    except Exception as e:
+        return html.Span(f"Error saving: {e}", style={"color": "red"})
 
 
 # ── Helper: empty figure ─────────────────────────────────────────────────────

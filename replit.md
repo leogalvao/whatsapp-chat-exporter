@@ -1,18 +1,9 @@
-# WhatsApp Chat Exporter
+# Snow Removal Deployment Tracker
 
 ## Overview
-This project consists of two components:
-1. **Chrome Extension**: A WhatsApp Web chat exporter that exports chats to JSON/CSV/TXT formats with organized media folders
-2. **Data Dashboard**: A Python Dash web application that analyzes exported WhatsApp chat data with interactive charts and filters for field crew productivity tracking
+A Python Dash web application that analyzes exported WhatsApp chat data with interactive charts and filters for snow removal field crew productivity tracking.
 
 ## Project Architecture
-
-### Chrome Extension Files
-- `manifest.json` - Chrome extension manifest (v3)
-- `popup.html` / `popup.js` / `popup.css` - Extension popup UI
-- `content.js` / `content-styles.css` - Content script injected into WhatsApp Web
-- `background.js` - Service worker for handling downloads
-- `icons/` - Extension icons
 
 ### Data Analysis (Python)
 - `data/dashboard_web.py` - **Main runnable**: Plotly Dash web dashboard (runs on port 5000)
@@ -32,13 +23,14 @@ This project consists of two components:
 - `data/config/snow_removal.json` - Configuration for deployment types, location types, expected service times, non-trackable senders, standard travel times
 
 ## Dashboard Structure
-The dashboard has 6 tabs:
+The dashboard has 7 tabs:
 1. **Overview** - Message volume, types, activity heatmap, sender participation, daily timeline
 2. **Productivity** - Daily productivity scores, crew leaderboard with rankings, first report times, reporting windows, idle time detection, daily message trends
 3. **Crew Analysis** - Per-sender metrics, message gaps, crew scorecards, sites/hour, transition times, route timelines, pace consistency, top locations
 4. **Deployments** - Deployment summary, timeline, cross-deployment comparison, performance trends, sites heatmap, downloadable HTML reports
 5. **Operations** - Routing Gantt chart, deployment burn-down (actual vs 12hr expected pace), location type performance, traffic analysis, delay report, recall summary
 6. **Data Quality** - Noise filtering overview, raw message data table
+7. **Settings** - Crew location type assignment (Sidewalk/Parking Lot), non-trackable sender management, expected deployment hours, service time configuration
 
 ### Key Dashboard Features
 - **KPI Summary Bar**: Always-visible row of 6 metric cards (Total Messages, Active Crews, Avg Sites/Hour, Avg First Report, Total Sites, Avg Transition)
@@ -60,6 +52,12 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Settings tab and cleanup
+  - Added Settings tab with crew location type assignment (Sidewalk/Parking Lot/Auto-detect)
+  - Added non-trackable sender management via checkboxes
+  - Added expected deployment hours and service time configuration
+  - Settings persist to data/config/snow_removal.json
+  - Removed Chrome extension files (no longer used)
 - 2026-02-23: Snow Removal Operations integration
   - Created domain model module (data/domain_model.py) with formalized entities
   - Added configuration system (data/config/snow_removal.json)
