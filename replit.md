@@ -23,14 +23,15 @@ A Python Dash web application that analyzes exported WhatsApp chat data with int
 - `data/config/snow_removal.json` - Configuration for deployment types, location types, expected service times, non-trackable senders, standard travel times
 
 ## Dashboard Structure
-The dashboard has 7 tabs:
+The dashboard has 8 tabs:
 1. **Overview** - Message volume, types, activity heatmap, sender participation, daily timeline
 2. **Productivity** - Daily productivity scores, crew leaderboard with rankings, first report times, reporting windows, idle time detection, daily message trends
 3. **Crew Analysis** - Per-sender metrics, message gaps, crew scorecards, sites/hour, transition times, route timelines, pace consistency, top locations
 4. **Deployments** - Deployment summary, timeline, cross-deployment comparison, performance trends, sites heatmap, downloadable HTML reports
 5. **Operations** - Routing Gantt chart, deployment burn-down (actual vs 12hr expected pace), location type performance, traffic analysis, delay report, recall summary
-6. **Data Quality** - Noise filtering overview, raw message data table
-7. **Settings** - Crew location type assignment (Sidewalk/Parking Lot), non-trackable sender management, expected deployment hours, service time configuration
+6. **Map** - DC Service Map with OpenStreetMap tiles, DC boundary polygon from ArcGIS API, location dots color-coded by crew, marker size by visit frequency
+7. **Data Quality** - Noise filtering overview, raw message data table
+8. **Settings** - Crew location type assignment (Sidewalk/Parking Lot), non-trackable sender management, expected deployment hours, service time configuration, location registry upload
 
 ### Key Dashboard Features
 - **KPI Summary Bar**: Always-visible row of 6 metric cards (Total Messages, Active Crews, Avg Sites/Hour, Avg First Report, Total Sites, Avg Transition)
@@ -52,6 +53,15 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-23: Added Location Registry and Map tab
+  - Location CSV upload in Settings with fuzzy matching against chat data locations
+  - Expected CSV format: location_name, address, lat, lon, crew_override
+  - Fuzzy matching with exact/substring/abbreviation-based matching and confidence scores
+  - Editable DataTable for manual crew assignment overrides
+  - New Map tab with DC boundary from ArcGIS API (cached locally)
+  - OpenStreetMap tiles, location dots color-coded by crew, marker size by visit frequency
+  - DC boundary polygon from data/config/dc_boundary.json
+  - Location registry persisted in data/config/snow_removal.json
 - 2026-02-23: Fixed CSV and JSON export endpoints
   - Fixed KeyError on 'coverage' column missing from productivity score DataFrame
   - Added coverage column to _build_daily_productivity_score output

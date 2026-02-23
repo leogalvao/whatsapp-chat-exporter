@@ -173,6 +173,44 @@ def _normalize_location(loc):
     return loc
 
 
+_ABBREV_MAP = {
+    "street": "st", "st": "street",
+    "avenue": "ave", "ave": "avenue",
+    "drive": "dr", "dr": "drive",
+    "road": "rd", "rd": "road",
+    "boulevard": "blvd", "blvd": "boulevard",
+    "place": "pl", "pl": "place",
+    "court": "ct", "ct": "court",
+    "lane": "ln", "ln": "lane",
+}
+
+
+def _fuzzy_match_location(name, known_locations):
+    if not name or not known_locations:
+        return ("", 0)
+    norm = _normalize_location(name)
+    for loc in known_locations:
+        if norm == _normalize_location(loc):
+            return (loc, 100)
+    for loc in known_locations:
+        nloc = _normalize_location(loc)
+        if norm in nloc or nloc in norm:
+            return (loc, 80)
+    norm_words = norm.split()
+    expanded_variants = set()
+    expanded_variants.add(norm)
+    for i, w in enumerate(norm_words):
+        if w in _ABBREV_MAP:
+            variant = norm_words[:i] + [_ABBREV_MAP[w]] + norm_words[i+1:]
+            expanded_variants.add(" ".join(variant))
+    for loc in known_locations:
+        nloc = _normalize_location(loc)
+        for variant in expanded_variants:
+            if variant in nloc or nloc in variant:
+                return (loc, 60)
+    return ("", 0)
+
+
 def extract_location(content):
     """Extract a location from message content, or return empty string.
 
@@ -916,6 +954,17 @@ main_content = dbc.Tabs(
                 dbc.Col(html.Div(id="recall-summary-container"), md=12),
             ], className="mt-3"),
         ]),
+        dbc.Tab(label="Map", tab_id="tab-map", children=[
+            html.Div([
+                html.H4("DC Service Map", className="mb-1"),
+                html.P("Geographic view of service locations across the DC area. Dot size reflects visit frequency.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(id="chart-service-map", style={"height": "700px"}), md=12),
+            ]),
+            dcc.Store(id="map-data-store"),
+        ]),
         dbc.Tab(label="Data Quality", tab_id="tab-quality", children=[
             html.Div([
                 html.H4("Data Quality", className="mb-1"),
@@ -988,6 +1037,62 @@ main_content = dbc.Tabs(
                         ], md=4),
                     ]),
                 ], md=6),
+            ]),
+            html.Hr(className="my-3"),
+            dbc.Row([
+                dbc.Col([
+                    html.H5("Location Registry", className="mb-2"),
+                    html.P("Upload a CSV of locations (location_name,address,lat,lon,crew_override). "
+                           "Locations are fuzzy-matched to chat data automatically.",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    dcc.Upload(
+                        id="upload-locations-csv",
+                        children=html.Div([
+                            "Drag & drop a CSV file here, or ",
+                            html.A("click to browse", className="text-primary fw-bold"),
+                        ], style={"lineHeight": "40px"}),
+                        style={
+                            "borderWidth": "2px",
+                            "borderStyle": "dashed",
+                            "borderRadius": "8px",
+                            "borderColor": "#adb5bd",
+                            "textAlign": "center",
+                            "padding": "10px 15px",
+                            "cursor": "pointer",
+                            "backgroundColor": "#f8f9fa",
+                            "height": "60px",
+                        },
+                        multiple=False,
+                        accept=".csv",
+                    ),
+                    html.Div(id="locations-upload-status", className="mt-2"),
+                    html.Div(
+                        dash_table.DataTable(
+                            id="locations-registry-table",
+                            columns=[
+                                {"name": "Location Name", "id": "location_name", "editable": False},
+                                {"name": "Address", "id": "address", "editable": False},
+                                {"name": "Lat", "id": "lat", "editable": False},
+                                {"name": "Lon", "id": "lon", "editable": False},
+                                {"name": "Matched Chat Location", "id": "matched_chat_location", "editable": False},
+                                {"name": "Crew Override", "id": "crew_override", "editable": True},
+                            ],
+                            data=[
+                                {k: r.get(k, "") for k in ["location_name", "address", "lat", "lon", "matched_chat_location", "crew_override"]}
+                                for r in SNOW_CONFIG.get("location_registry", [])
+                            ],
+                            style_table={"overflowX": "auto"},
+                            style_cell={"textAlign": "left", "padding": "5px", "fontSize": "13px"},
+                            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5"},
+                            page_size=15,
+                            editable=True,
+                        ),
+                        className="mt-3",
+                    ),
+                    dbc.Button("Save Locations", id="locations-save-btn", color="success",
+                               className="mt-2 me-2", n_clicks=0),
+                    html.Span(id="locations-save-status", className="ms-2 align-middle"),
+                ], md=12),
             ]),
         ]),
     ],
@@ -3906,6 +4011,243 @@ def save_settings(n_clicks, crew_values, crew_ids, track_values, track_ids,
         return html.Span("Settings saved!", style={"color": "green", "fontWeight": "bold"})
     except Exception as e:
         return html.Span(f"Error saving: {e}", style={"color": "red"})
+
+
+# ── Location CSV upload callback ──────────────────────────────────────────────
+
+@app.callback(
+    [Output("locations-registry-table", "data"),
+     Output("locations-upload-status", "children")],
+    Input("upload-locations-csv", "contents"),
+    State("upload-locations-csv", "filename"),
+    prevent_initial_call=True,
+)
+def upload_locations_csv(contents, filename):
+    global SNOW_CONFIG
+    if contents is None:
+        raise PreventUpdate
+    try:
+        import io
+        content_type, content_string = contents.split(",")
+        decoded = base64.b64decode(content_string).decode("utf-8")
+        csv_df = pd.read_csv(io.StringIO(decoded))
+        required = ["location_name"]
+        for col in required:
+            if col not in csv_df.columns:
+                return no_update, html.Span(
+                    f"CSV missing required column: {col}", style={"color": "red"})
+        known_locations = sorted(
+            DF_ALL[DF_ALL["location"].str.len() > 0]["location"].unique()
+        ) if not DF_ALL.empty else []
+        registry = []
+        for _, row in csv_df.iterrows():
+            name = str(row.get("location_name", "")).strip()
+            if not name:
+                continue
+            address = str(row.get("address", "")).strip() if "address" in csv_df.columns else ""
+            lat = row.get("lat", None)
+            lon = row.get("lon", None)
+            crew_override = str(row.get("crew_override", "")).strip() if "crew_override" in csv_df.columns else ""
+            if pd.isna(lat):
+                lat = None
+            if pd.isna(lon):
+                lon = None
+            if crew_override and crew_override.lower() == "nan":
+                crew_override = ""
+            matched, score = _fuzzy_match_location(name, known_locations)
+            if not matched and address:
+                matched, score = _fuzzy_match_location(address, known_locations)
+            match_display = f"{matched} ({score}%)" if matched else ""
+            registry.append({
+                "location_name": name,
+                "address": address,
+                "lat": float(lat) if lat is not None else "",
+                "lon": float(lon) if lon is not None else "",
+                "matched_chat_location": match_display,
+                "crew_override": crew_override,
+                "_matched_raw": matched,
+                "_match_score": score,
+            })
+        SNOW_CONFIG["location_registry"] = registry
+        table_data = [
+            {k: r.get(k, "") for k in ["location_name", "address", "lat", "lon", "matched_chat_location", "crew_override"]}
+            for r in registry
+        ]
+        matched_count = sum(1 for r in registry if r.get("_matched_raw"))
+        status = html.Span(
+            f"Loaded {len(registry)} locations from {filename}. "
+            f"{matched_count} matched to chat data.",
+            style={"color": "green", "fontWeight": "bold"})
+        return table_data, status
+    except Exception as e:
+        return no_update, html.Span(f"Error parsing CSV: {e}", style={"color": "red"})
+
+
+@app.callback(
+    Output("locations-save-status", "children"),
+    Input("locations-save-btn", "n_clicks"),
+    State("locations-registry-table", "data"),
+    prevent_initial_call=True,
+)
+def save_locations_registry(n_clicks, table_data):
+    global SNOW_CONFIG
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        if table_data:
+            clean_registry = []
+            for row in table_data:
+                entry = {
+                    "location_name": row.get("location_name", ""),
+                    "address": row.get("address", ""),
+                    "lat": row.get("lat", ""),
+                    "lon": row.get("lon", ""),
+                    "matched_chat_location": row.get("matched_chat_location", ""),
+                    "crew_override": row.get("crew_override", ""),
+                }
+                mcl = entry["matched_chat_location"]
+                if mcl and "(" in mcl:
+                    entry["_matched_raw"] = mcl.split("(")[0].strip()
+                clean_registry.append(entry)
+            SNOW_CONFIG["location_registry"] = clean_registry
+        config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(SNOW_CONFIG, f, indent=2)
+        return html.Span("Locations saved!", style={"color": "green", "fontWeight": "bold"})
+    except Exception as e:
+        return html.Span(f"Error saving: {e}", style={"color": "red"})
+
+
+# ── DC Boundary helper ────────────────────────────────────────────────────────
+
+def _load_dc_boundary():
+    cache_path = os.path.join(DATA_DIR, "config", "dc_boundary.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    try:
+        import urllib.request
+        url = ("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/"
+               "Administrative_Other_Boundaries_WebMercator/MapServer/10/"
+               "query?where=1%3D1&outFields=*&outSR=4326&f=json")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return data
+    except Exception as e:
+        print(f"[map] Failed to load DC boundary: {e}")
+        return None
+
+
+# ── Map callback ──────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("chart-service-map", "figure"),
+    Input("main-tabs", "active_tab"),
+    prevent_initial_call=True,
+)
+def render_service_map(active_tab):
+    if active_tab != "tab-map":
+        raise PreventUpdate
+    try:
+        fig = go.Figure()
+
+        boundary_data = _load_dc_boundary()
+        if boundary_data and "features" in boundary_data:
+            for feature in boundary_data["features"]:
+                geom = feature.get("geometry", {})
+                rings = geom.get("rings", [])
+                for ring in rings:
+                    lats = [pt[1] for pt in ring]
+                    lons = [pt[0] for pt in ring]
+                    lats.append(lats[0])
+                    lons.append(lons[0])
+                    fig.add_trace(go.Scattermap(
+                        lat=lats,
+                        lon=lons,
+                        mode="lines",
+                        line=dict(width=2, color="#1f77b4"),
+                        name="DC Boundary",
+                        showlegend=True,
+                        hoverinfo="skip",
+                    ))
+
+        registry = SNOW_CONFIG.get("location_registry", [])
+        loc_counts = {}
+        if not DF_ALL.empty:
+            counts = DF_ALL[DF_ALL["location"].str.len() > 0]["location"].value_counts()
+            loc_counts = counts.to_dict()
+
+        locs_with_coords = [
+            r for r in registry
+            if r.get("lat") and r.get("lon")
+            and r["lat"] != "" and r["lon"] != ""
+        ]
+
+        if locs_with_coords:
+            colors = px.colors.qualitative.Set2
+            crew_set = sorted(set(
+                r.get("crew_override", "") or "Unassigned" for r in locs_with_coords
+            ))
+            crew_color = {c: colors[i % len(colors)] for i, c in enumerate(crew_set)}
+
+            for crew in crew_set:
+                crew_locs = [r for r in locs_with_coords
+                             if (r.get("crew_override", "") or "Unassigned") == crew]
+                lats = [float(r["lat"]) for r in crew_locs]
+                lons = [float(r["lon"]) for r in crew_locs]
+                names = [r.get("location_name", "") for r in crew_locs]
+                matched = [r.get("_matched_raw", r.get("matched_chat_location", "")) for r in crew_locs]
+                sizes = []
+                for r in crew_locs:
+                    m = r.get("_matched_raw", "")
+                    if not m:
+                        mc = r.get("matched_chat_location", "")
+                        if mc and "(" in mc:
+                            m = mc.split("(")[0].strip()
+                    cnt = loc_counts.get(m, 1)
+                    sizes.append(max(8, min(30, 8 + cnt * 2)))
+                hovers = [
+                    f"{n}<br>Visits: {loc_counts.get(matched[i].split('(')[0].strip() if '(' in str(matched[i]) else matched[i], 0)}"
+                    for i, n in enumerate(names)
+                ]
+                fig.add_trace(go.Scattermap(
+                    lat=lats,
+                    lon=lons,
+                    mode="markers",
+                    marker=dict(
+                        size=sizes,
+                        color=crew_color[crew],
+                        opacity=0.8,
+                    ),
+                    text=hovers,
+                    hoverinfo="text",
+                    name=crew,
+                    showlegend=True,
+                ))
+
+        fig.update_layout(
+            map=dict(
+                style="open-street-map",
+                center=dict(lat=38.9072, lon=-77.0369),
+                zoom=11,
+            ),
+            margin=dict(l=0, r=0, t=30, b=0),
+            height=700,
+            title="DC Service Map",
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        )
+        return fig
+    except Exception as e:
+        print(f"[map] Error rendering map: {e}")
+        return _empty_fig("DC Service Map")
 
 
 # ── Helper: empty figure ─────────────────────────────────────────────────────
