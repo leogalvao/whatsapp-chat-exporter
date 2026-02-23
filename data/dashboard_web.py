@@ -4174,15 +4174,19 @@ def upload_locations_csv(contents, filename):
                 "_matched_raw": matched,
                 "_match_score": score,
             })
+        registry, auto_count = _auto_assign_crews(registry, DF_ALL)
         SNOW_CONFIG["location_registry"] = registry
         table_data = [
             {k: r.get(k, "") for k in ["location_name", "address", "matched_chat_location", "crew_sidewalk", "crew_parking_lot"]}
             for r in registry
         ]
         matched_count = sum(1 for r in registry if r.get("_matched_raw"))
+        parts = [f"Loaded {len(registry)} locations from {filename}.",
+                 f"{matched_count} matched to chat data."]
+        if auto_count:
+            parts.append(f"Auto-assigned crews to {auto_count} locations.")
         status = html.Span(
-            f"Loaded {len(registry)} locations from {filename}. "
-            f"{matched_count} matched to chat data.",
+            " ".join(parts),
             style={"color": "green", "fontWeight": "bold"})
         return table_data, status
     except Exception as e:
@@ -4345,14 +4349,19 @@ def render_service_map(active_tab):
         ]
 
         if locs_with_coords:
-            colors = px.colors.qualitative.Set2
+            BOLD_COLORS = [
+                "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
+                "#42d4f4", "#f032e6", "#bfef45", "#fabed4", "#469990",
+                "#dcbeff", "#9A6324", "#800000", "#aaffc3", "#808000",
+                "#000075", "#ff4500", "#00ced1",
+            ]
             crew_set = set()
             for r in locs_with_coords:
                 sw = r.get("crew_sidewalk", "")
                 pl = r.get("crew_parking_lot", "")
                 crew_set.add(sw if sw else (pl if pl else "Unassigned"))
             crew_set = sorted(crew_set)
-            crew_color = {c: colors[i % len(colors)] for i, c in enumerate(crew_set)}
+            crew_color = {c: BOLD_COLORS[i % len(BOLD_COLORS)] for i, c in enumerate(crew_set)}
 
             for crew in crew_set:
                 crew_locs = [r for r in locs_with_coords
@@ -4381,7 +4390,7 @@ def render_service_map(active_tab):
                     marker=dict(
                         size=sizes,
                         color=crew_color[crew],
-                        opacity=0.8,
+                        opacity=0.95,
                     ),
                     text=hovers,
                     hoverinfo="text",
