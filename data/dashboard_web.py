@@ -1042,7 +1042,7 @@ main_content = dbc.Tabs(
             dbc.Row([
                 dbc.Col([
                     html.H5("Location Registry", className="mb-2"),
-                    html.P("Upload a CSV of locations (location_name,address,lat,lon,crew_override). "
+                    html.P("Upload a CSV of locations (Building Name, Billing Street, Crew Sidewalk, Crew Parking Lot). "
                            "Locations are fuzzy-matched to chat data automatically.",
                            className="text-muted mb-2", style={"fontSize": "13px"}),
                     dcc.Upload(
@@ -1070,15 +1070,14 @@ main_content = dbc.Tabs(
                         dash_table.DataTable(
                             id="locations-registry-table",
                             columns=[
-                                {"name": "Location Name", "id": "location_name", "editable": False},
+                                {"name": "Building Name", "id": "location_name", "editable": False},
                                 {"name": "Address", "id": "address", "editable": False},
-                                {"name": "Lat", "id": "lat", "editable": False},
-                                {"name": "Lon", "id": "lon", "editable": False},
                                 {"name": "Matched Chat Location", "id": "matched_chat_location", "editable": False},
-                                {"name": "Crew Override", "id": "crew_override", "editable": True},
+                                {"name": "Crew Sidewalk", "id": "crew_sidewalk", "editable": True},
+                                {"name": "Crew Parking Lot", "id": "crew_parking_lot", "editable": True},
                             ],
                             data=[
-                                {k: r.get(k, "") for k in ["location_name", "address", "lat", "lon", "matched_chat_location", "crew_override"]}
+                                {k: r.get(k, "") for k in ["location_name", "address", "matched_chat_location", "crew_sidewalk", "crew_parking_lot"]}
                                 for r in SNOW_CONFIG.get("location_registry", [])
                             ],
                             style_table={"overflowX": "auto"},
@@ -4031,29 +4030,52 @@ def upload_locations_csv(contents, filename):
         content_type, content_string = contents.split(",")
         decoded = base64.b64decode(content_string).decode("utf-8")
         csv_df = pd.read_csv(io.StringIO(decoded))
-        required = ["location_name"]
-        for col in required:
-            if col not in csv_df.columns:
-                return no_update, html.Span(
-                    f"CSV missing required column: {col}", style={"color": "red"})
+        csv_df.columns = [c.strip() for c in csv_df.columns]
+
+        is_routes_format = "Building Name" in csv_df.columns
+        if is_routes_format:
+            name_col = "Building Name"
+            addr_col = "Billing Street"
+        else:
+            name_col = "location_name" if "location_name" in csv_df.columns else None
+            addr_col = "address" if "address" in csv_df.columns else None
+
+        if name_col is None or name_col not in csv_df.columns:
+            return no_update, html.Span(
+                "CSV must have 'Building Name' or 'location_name' column.", style={"color": "red"})
+
         known_locations = sorted(
             DF_ALL[DF_ALL["location"].str.len() > 0]["location"].unique()
         ) if not DF_ALL.empty else []
         registry = []
         for _, row in csv_df.iterrows():
-            name = str(row.get("location_name", "")).strip()
+            name = str(row.get(name_col, "")).strip()
             if not name:
                 continue
-            address = str(row.get("address", "")).strip() if "address" in csv_df.columns else ""
-            lat = row.get("lat", None)
-            lon = row.get("lon", None)
-            crew_override = str(row.get("crew_override", "")).strip() if "crew_override" in csv_df.columns else ""
-            if pd.isna(lat):
+            address = str(row.get(addr_col, "")).strip() if addr_col and addr_col in csv_df.columns else ""
+            if address.lower() == "nan":
+                address = ""
+
+            crew_sw = ""
+            crew_pl = ""
+            if is_routes_format:
+                crew_sw = str(row.get("Crew Sidewalk", "")).strip()
+                crew_pl = str(row.get("Crew Parking Lot", "")).strip()
+            else:
+                crew_sw = str(row.get("crew_sidewalk", "")).strip() if "crew_sidewalk" in csv_df.columns else ""
+                crew_pl = str(row.get("crew_parking_lot", "")).strip() if "crew_parking_lot" in csv_df.columns else ""
+            if crew_sw.lower() == "nan":
+                crew_sw = ""
+            if crew_pl.lower() == "nan":
+                crew_pl = ""
+
+            lat = row.get("lat", None) if "lat" in csv_df.columns else None
+            lon = row.get("lon", None) if "lon" in csv_df.columns else None
+            if pd.isna(lat) if lat is not None else True:
                 lat = None
-            if pd.isna(lon):
+            if pd.isna(lon) if lon is not None else True:
                 lon = None
-            if crew_override and crew_override.lower() == "nan":
-                crew_override = ""
+
             matched, score = _fuzzy_match_location(name, known_locations)
             if not matched and address:
                 matched, score = _fuzzy_match_location(address, known_locations)
@@ -4064,13 +4086,14 @@ def upload_locations_csv(contents, filename):
                 "lat": float(lat) if lat is not None else "",
                 "lon": float(lon) if lon is not None else "",
                 "matched_chat_location": match_display,
-                "crew_override": crew_override,
+                "crew_sidewalk": crew_sw,
+                "crew_parking_lot": crew_pl,
                 "_matched_raw": matched,
                 "_match_score": score,
             })
         SNOW_CONFIG["location_registry"] = registry
         table_data = [
-            {k: r.get(k, "") for k in ["location_name", "address", "lat", "lon", "matched_chat_location", "crew_override"]}
+            {k: r.get(k, "") for k in ["location_name", "address", "matched_chat_location", "crew_sidewalk", "crew_parking_lot"]}
             for r in registry
         ]
         matched_count = sum(1 for r in registry if r.get("_matched_raw"))
@@ -4095,19 +4118,26 @@ def save_locations_registry(n_clicks, table_data):
         raise PreventUpdate
     try:
         if table_data:
+            existing = {r.get("location_name", ""): r for r in SNOW_CONFIG.get("location_registry", [])}
             clean_registry = []
             for row in table_data:
+                name = row.get("location_name", "")
+                prev = existing.get(name, {})
                 entry = {
-                    "location_name": row.get("location_name", ""),
-                    "address": row.get("address", ""),
-                    "lat": row.get("lat", ""),
-                    "lon": row.get("lon", ""),
-                    "matched_chat_location": row.get("matched_chat_location", ""),
-                    "crew_override": row.get("crew_override", ""),
+                    "location_name": name,
+                    "address": row.get("address", prev.get("address", "")),
+                    "lat": prev.get("lat", ""),
+                    "lon": prev.get("lon", ""),
+                    "matched_chat_location": row.get("matched_chat_location", prev.get("matched_chat_location", "")),
+                    "crew_sidewalk": row.get("crew_sidewalk", ""),
+                    "crew_parking_lot": row.get("crew_parking_lot", ""),
+                    "_matched_raw": prev.get("_matched_raw", ""),
+                    "_match_score": prev.get("_match_score", 0),
                 }
-                mcl = entry["matched_chat_location"]
-                if mcl and "(" in mcl:
-                    entry["_matched_raw"] = mcl.split("(")[0].strip()
+                if not entry["_matched_raw"]:
+                    mcl = entry["matched_chat_location"]
+                    if mcl and "(" in mcl:
+                        entry["_matched_raw"] = mcl.split("(")[0].strip()
                 clean_registry.append(entry)
             SNOW_CONFIG["location_registry"] = clean_registry
         config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
@@ -4193,14 +4223,17 @@ def render_service_map(active_tab):
 
         if locs_with_coords:
             colors = px.colors.qualitative.Set2
-            crew_set = sorted(set(
-                r.get("crew_override", "") or "Unassigned" for r in locs_with_coords
-            ))
+            crew_set = set()
+            for r in locs_with_coords:
+                sw = r.get("crew_sidewalk", "")
+                pl = r.get("crew_parking_lot", "")
+                crew_set.add(sw if sw else (pl if pl else "Unassigned"))
+            crew_set = sorted(crew_set)
             crew_color = {c: colors[i % len(colors)] for i, c in enumerate(crew_set)}
 
             for crew in crew_set:
                 crew_locs = [r for r in locs_with_coords
-                             if (r.get("crew_override", "") or "Unassigned") == crew]
+                             if (r.get("crew_sidewalk", "") or r.get("crew_parking_lot", "") or "Unassigned") == crew]
                 lats = [float(r["lat"]) for r in crew_locs]
                 lons = [float(r["lon"]) for r in crew_locs]
                 names = [r.get("location_name", "") for r in crew_locs]
