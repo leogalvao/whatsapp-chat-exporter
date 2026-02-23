@@ -12,3 +12,10 @@ __pycache__/
 
 # Claude
 .claude/
+
+# Python virtual environment
+.pythonlibs/
+*.egg-info/
+dist/
+build/
+.venv/

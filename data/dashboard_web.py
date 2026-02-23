@@ -2,7 +2,7 @@
 """Browser-based interactive WhatsApp chat dashboard using Plotly Dash.
 
 Reads all whatsapp_*.json exports, applies noise filtering, and provides
-a rich interactive dashboard at http://localhost:8050.
+a rich interactive dashboard at http://0.0.0.0:5000.
 
 Usage:
     pip install dash dash-bootstrap-components
@@ -345,6 +345,12 @@ def load_all_data(data_dir):
             })
 
     df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame(columns=[
+            "chat", "sender", "sender_resolved", "timestamp", "time",
+            "hour", "hour_int", "msg_date", "type", "content_raw",
+            "content", "content_len", "location", "noise_type", "export_date",
+        ])
     df["export_date"] = pd.to_datetime(df["export_date"])
     df["msg_date"] = pd.to_datetime(df["msg_date"])
     return df
@@ -355,12 +361,12 @@ def load_all_data(data_dir):
 DF_ALL = load_all_data(DATA_DIR)
 
 # Precompute lists for filters
-ALL_CHATS = sorted(DF_ALL["chat"].unique())
-ALL_SENDERS = sorted(DF_ALL[DF_ALL["sender"] != ""]["sender"].unique())
+ALL_CHATS = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
+ALL_SENDERS = sorted(DF_ALL[DF_ALL["sender"] != ""]["sender"].unique()) if not DF_ALL.empty else []
 ALL_SENDERS_RESOLVED = sorted(
-    DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique())
-ALL_TYPES = sorted(DF_ALL["type"].unique())
-NOISE_TYPES = sorted(DF_ALL["noise_type"].unique())
+    DF_ALL[DF_ALL["sender_resolved"] != ""]["sender_resolved"].unique()) if not DF_ALL.empty else []
+ALL_TYPES = sorted(DF_ALL["type"].unique()) if not DF_ALL.empty else []
+NOISE_TYPES = sorted(DF_ALL["noise_type"].unique()) if not DF_ALL.empty else []
 
 # Date range (prefer msg_date when available, fall back to export_date)
 _date_col = DF_ALL["msg_date"].dropna()
@@ -368,7 +374,7 @@ if _date_col.empty:
     _date_col = DF_ALL["export_date"].dropna()
 DATE_MIN = _date_col.min().date() if not _date_col.empty else date(2026, 2, 8)
 DATE_MAX = _date_col.max().date() if not _date_col.empty else date(2026, 2, 8)
-ALL_DATES = sorted(DF_ALL["msg_date"].dropna().dt.date.unique())
+ALL_DATES = sorted(DF_ALL["msg_date"].dropna().dt.date.unique()) if not DF_ALL.empty else []
 
 
 # ── Deployment computation ────────────────────────────────────────────────────
@@ -2781,10 +2787,10 @@ def print_report():
         print("  No site visit data available.")
 
     print(f"\n{'═' * 72}")
-    print(f"  Dashboard ready at http://localhost:8050")
+    print(f"  Dashboard ready at http://0.0.0.0:5000")
     print(f"{'═' * 72}\n")
 
 
 if __name__ == "__main__":
     print_report()
-    app.run(debug=True, host="0.0.0.0", port=8050, threaded=True)
+    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True)
