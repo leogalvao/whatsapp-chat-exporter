@@ -44,6 +44,15 @@ Key dashboard features include:
 - Invoice-based route creation: invoice line items become routes in the deployment breakdown (Source: Chat/Invoice/Both), with auto-matching between chat locations and invoice addresses.
 - Auto-route count from invoices: when no manual override is set, invoice site_count is used as the route count for finance calculations, KPI bar, deployment summary, and burn-down charts. Priority: manual override > invoice site_count (max per deployment) > chat-detected routes. Multiple invoice types per deployment use max (not sum) for site count.
 
+### Dispatch Routes
+- Per-deployment crew-to-site assignments stored in `dispatch_routes` within `data/config/snow_removal.json`.
+- Imported from structured CSV files with columns: crew_name, site_name, address, ward, lat, lng, stop_order.
+- Feb 21-24 CSV: 131 sites, 15 SW crews, plus parking lot crew cross-references (9 sites with PL crew noted).
+- Feb 10-11 CSV: 50 sites, 9 crews (8 named + UNASSIGNED group of 5 sites).
+- Cross-referenced with location registry; 29 new locations added from Feb 10-11 data.
+- "SW Crew 9" in Feb 21-24 data has no named crew leader (9 sites including Triangle Parks, Marie Reed, Belmont Park).
+- "Anonio Rivera" is a typo for "Antonio Rivera" in Feb 21-24 data.
+
 ### Supported Data Formats
 The application supports multiple JSON data formats for chat exports, including unified multi-chat exports, legacy per-chat exports, pre-computed metrics (`metrics_report.json`), and automatically skips OCR dispatch data (`_dispatches.json`). It also includes robust handling for a new `v2 CrewChatData` format, supporting message-level deduplication and detailed message attributes.
 
