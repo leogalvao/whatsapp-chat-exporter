@@ -53,6 +53,13 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-24: v2 CrewChatData format support
+  - Auto-detects new JSON format with id, isOutgoing, isForwarded, isDeleted, media details
+  - isDeleted messages classified as "deleted" noise type (filtered from clean metrics)
+  - Message-level deduplication via id field (prevents inflated counts from re-exports)
+  - New DataFrame columns: msg_id, is_outgoing, is_forwarded, is_deleted, has_media, media_type, media_file
+  - _dispatches.json files (OCR dispatch data) automatically skipped during discovery
+  - Backward compatible: legacy exports without new fields continue to work unchanged
 - 2026-02-23: Crew-size-adjusted burn-down curves
   - Burn-down expected pace now scaled by crew count per deployment
   - Formula: adjusted_hours = expected_hours / crew_count (more crews = steeper expected curve)

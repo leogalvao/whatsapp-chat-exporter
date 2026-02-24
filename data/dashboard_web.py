@@ -331,9 +331,12 @@ def extract_location(content):
 def classify_noise(msg):
     """Classify a message into a noise type.
 
-    Accepts the full message dict so v1.5 fields (dateTime, date) can
-    distinguish real empty-sender messages from legacy captions.
+    Accepts the full message dict so v1.5+ fields (dateTime, date,
+    isDeleted, isForwarded) can be used for filtering.
     """
+    if msg.get("isDeleted"):
+        return "deleted"
+
     sender = msg.get("sender", "") or ""
     ts_str = msg.get("timestamp", "") or ""
     content = msg.get("content", "") or ""
@@ -346,8 +349,6 @@ def classify_noise(msg):
        "This message couldn\u2019t load" in content:
         return "load_error"
     if ts_str and not sender:
-        # v1.5 exports include dateTime/date — empty sender is an export
-        # artifact, not a media caption.  Treat as clean.
         if msg.get("dateTime") or msg.get("date"):
             return "clean"
         return "empty_sender_caption"
@@ -383,18 +384,19 @@ def _discover_json_files(data_dir):
       1. ``archive/whatsapp_*.json``  — legacy archive exports
       2. ``<Worker>/<timestamp_dir>/<Worker>.json`` — new v1.2 subfolder exports
     Directories in EXCLUDE_DIRS are skipped.
+    Files ending with ``_dispatches.json`` are OCR dispatch data, not chat
+    exports, and are skipped.
     """
     paths = []
 
-    # 1. Archive exports (all JSON files in archive/)
     for p in glob.glob(os.path.join(data_dir, "archive", "*.json")):
-        paths.append(p)
+        if not os.path.basename(p).endswith("_dispatches.json"):
+            paths.append(p)
 
-    # 2. Subfolder exports (recursive)
     for root, dirs, files in os.walk(data_dir):
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and d != "archive"]
         for fn in files:
-            if fn.endswith(".json"):
+            if fn.endswith(".json") and not fn.endswith("_dispatches.json"):
                 paths.append(os.path.join(root, fn))
 
     return sorted(set(paths))
@@ -403,12 +405,17 @@ def _discover_json_files(data_dir):
 def load_all_data(data_dir):
     """Load all JSON chat files, de-duplicate by chatName, build DataFrame.
 
+    Supports both legacy exports and the v2 CrewChatData format which adds
+    id, isOutgoing, isForwarded, isDeleted, and media detail fields.
+
     Chat names are normalized (case-insensitive, accent-folded) so that
     variants like "Julián Ordóñez" and "julian ordonez" merge into one group.
     The canonical display name is taken from the file with the most messages.
+
+    When multiple files share the same normalized chatName the one with
+    the most messages wins.  Within a file, messages are de-duplicated by
+    their ``id`` field (v2 format) so re-exports don't inflate counts.
     """
-    # Collect all files grouped by *normalized* chatName; keep the one with
-    # most messages and use its original name for display.
     chat_files = {}  # norm_key -> (path, msgs, export_date, display_name)
     for path in _discover_json_files(data_dir):
         try:
@@ -428,16 +435,28 @@ def load_all_data(data_dir):
     rows = []
     for _key, (path, msgs, export_date, chat_name) in chat_files.items():
         prev_sender = ""
+        seen_ids = set()
         for m in msgs:
+            msg_id = m.get("id", "")
+            if msg_id:
+                if msg_id in seen_ids:
+                    continue
+                seen_ids.add(msg_id)
+
             sender = m.get("sender", "") or ""
             ts_str = m.get("timestamp", "") or ""
             content_raw = m.get("content", "") or ""
             msg_type = m.get("type", "text") or "text"
+            is_outgoing = bool(m.get("isOutgoing", False))
+            is_forwarded = bool(m.get("isForwarded", False))
+            is_deleted = bool(m.get("isDeleted", False))
             ts = parse_msg_datetime(m, export_date)
 
-            # Detect fake senders (locations/captions in the sender field).
-            # Move the fake name into content when original content is empty
-            # or just "[Image]", then treat sender as empty.
+            media_obj = m.get("media")
+            media_type = media_obj.get("type", "") if isinstance(media_obj, dict) else ""
+            media_src = media_obj.get("exportedFilename", "") if isinstance(media_obj, dict) else ""
+            has_media = media_obj is not None
+
             if _is_fake_sender(sender):
                 if not content_raw or content_raw == "[Image]":
                     content_raw = sender
@@ -446,7 +465,6 @@ def load_all_data(data_dir):
             noise = classify_noise(m)
             content_clean = clean_content(content_raw)
 
-            # Resolve sender for captions
             sender_resolved = sender if sender else prev_sender
             if sender:
                 prev_sender = sender
@@ -469,6 +487,13 @@ def load_all_data(data_dir):
                 "location": extract_location(content_clean),
                 "noise_type": noise,
                 "export_date": export_date,
+                "msg_id": msg_id,
+                "is_outgoing": is_outgoing,
+                "is_forwarded": is_forwarded,
+                "is_deleted": is_deleted,
+                "has_media": has_media,
+                "media_type": media_type,
+                "media_file": media_src,
             })
 
     df = pd.DataFrame(rows)
@@ -477,6 +502,8 @@ def load_all_data(data_dir):
             "chat", "sender", "sender_resolved", "timestamp", "time",
             "hour", "hour_int", "msg_date", "type", "content_raw",
             "content", "content_len", "location", "noise_type", "export_date",
+            "msg_id", "is_outgoing", "is_forwarded", "is_deleted",
+            "has_media", "media_type", "media_file",
         ])
     df["export_date"] = pd.to_datetime(df["export_date"])
     df["msg_date"] = pd.to_datetime(df["msg_date"])
