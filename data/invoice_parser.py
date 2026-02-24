@@ -326,7 +326,8 @@ def match_invoice_to_deployment(invoice_date_str, deployments_list, tolerance_da
     return best_match
 
 
-def reconcile_invoice_with_chat(invoice, chat_locations, pricing_index, normalize_fn):
+def reconcile_invoice_with_chat(invoice, chat_locations, pricing_index, normalize_fn,
+                                billable_routes=None):
     line_items = invoice.get("line_items", [])
     reconciliation = []
 
@@ -340,6 +341,7 @@ def reconcile_invoice_with_chat(invoice, chat_locations, pricing_index, normaliz
 
         in_chat = False
         matched_chat_loc = None
+        matched_service_areas = []
         for cloc in chat_locations:
             cloc_norm = normalize_fn(cloc)
             if cloc_norm == bname_norm or cloc_norm == addr_norm:
@@ -354,6 +356,13 @@ def reconcile_invoice_with_chat(invoice, chat_locations, pricing_index, normaliz
                 in_chat = True
                 matched_chat_loc = cloc
                 break
+
+        if in_chat and billable_routes is not None and matched_chat_loc:
+            loc_norm = normalize_fn(matched_chat_loc)
+            for _, route in billable_routes.iterrows():
+                route_loc = normalize_fn(str(route.get("location", "")))
+                if route_loc == loc_norm:
+                    matched_service_areas.append(route.get("service_area", "Unknown"))
 
         contract_price = None
         if pricing_index:
@@ -378,6 +387,7 @@ def reconcile_invoice_with_chat(invoice, chat_locations, pricing_index, normaliz
             "contract_price": contract_price,
             "in_chat_data": in_chat,
             "matched_chat_location": matched_chat_loc,
+            "service_areas": ", ".join(sorted(set(matched_service_areas))) if matched_service_areas else "",
             "status": status,
             "notes": notes,
         })
@@ -402,6 +412,16 @@ def reconcile_invoice_with_chat(invoice, chat_locations, pricing_index, normaliz
         if not found:
             chat_not_invoiced.append(cloc)
 
+    sw_routes = 0
+    pl_routes = 0
+    if billable_routes is not None and not billable_routes.empty:
+        for _, route in billable_routes.iterrows():
+            sa = str(route.get("service_area", "")).strip()
+            if sa == "Parking Lot":
+                pl_routes += 1
+            else:
+                sw_routes += 1
+
     return {
         "line_items": reconciliation,
         "sites_invoiced": len(line_items),
@@ -410,4 +430,7 @@ def reconcile_invoice_with_chat(invoice, chat_locations, pricing_index, normaliz
         "price_mismatches": sum(1 for r in reconciliation if r["status"] == "price_mismatch"),
         "chat_not_invoiced": chat_not_invoiced,
         "chat_not_invoiced_count": len(chat_not_invoiced),
+        "billable_routes_total": sw_routes + pl_routes,
+        "sw_routes": sw_routes,
+        "pl_routes": pl_routes,
     }

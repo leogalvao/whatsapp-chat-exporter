@@ -38,6 +38,7 @@ from domain_model import (
     build_deployment_burndown, build_location_type_stats, build_traffic_analysis,
     build_delay_report, infer_location_type,
     build_location_coords, haversine_km,
+    count_billable_routes, get_billable_routes_df, billable_route_key,
 )
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -770,7 +771,15 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         else:
             dep_revenue = 0
             matched_sites = 0
+            loc_service_pairs = set()
             for loc in dep_locations:
+                loc_chats = dep_df[dep_df["location"] == loc]["chat"].unique()
+                sas = set()
+                for ch in loc_chats:
+                    sas.add(chat_crew_type.get(ch, "Sidewalk"))
+                for sa in sas:
+                    loc_service_pairs.add((loc, sa))
+            for loc, sa in loc_service_pairs:
                 pricing = _match_location_to_pricing(loc, pricing_index)
                 if pricing:
                     price = pricing.get(tier, pricing.get("price_under_6in", 0))
@@ -788,16 +797,23 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         sw_sites = 0
         pl_sites = 0
 
+        billable_routes_seen = set()
         for loc in dep_locations:
             loc_chats = dep_df[dep_df["location"] == loc]["chat"].unique()
+            service_areas_at_loc = set()
             for ch in loc_chats:
                 ct = chat_crew_type.get(ch, "Sidewalk")
-                if ct == "Parking Lot":
-                    pl_sites += 1
-                else:
-                    sw_sites += 1
-                break
+                service_areas_at_loc.add(ct)
+            for sa in service_areas_at_loc:
+                route_key = f"{label}|{loc}|{sa}"
+                if route_key not in billable_routes_seen:
+                    billable_routes_seen.add(route_key)
+                    if sa == "Parking Lot":
+                        pl_sites += 1
+                    else:
+                        sw_sites += 1
 
+        billable_site_count = sw_sites + pl_sites
         dep_salt_lbs = (sw_sites * salt_lbs_sw) + (pl_sites * salt_lbs_pl)
         dep_salt = dep_salt_lbs * salt_cost_lb
 
@@ -872,7 +888,9 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
             "snow_tier": tier.replace("price_", "").replace("_", " ").title(),
             "source": rev_source,
             "sites_serviced": matched_sites,
-            "total_sites": len(dep_locations),
+            "total_sites": billable_site_count,
+            "sw_routes": sw_sites,
+            "pl_routes": pl_sites,
             "crews": n_crews,
             "hours": round(dep_hours, 1),
             "revenue": round(dep_revenue, 2),
@@ -1104,7 +1122,7 @@ def _do_export_report():
     total_msgs = len(df)
     clean_msgs = len(df[df["noise_type"] == "clean"])
     active_crews = df["chat"].nunique()
-    total_sites = len(visits_df)
+    total_sites = _count_billable_routes_from_df(df)
     avg_sites_hr = round(sc["avg_sites_per_hour"].mean(), 2) if not sc.empty else 0
     avg_trans = round(sc["avg_transition_min"].mean(), 1) if not sc.empty else 0
     avg_first_str = "N/A"
@@ -2974,6 +2992,26 @@ def _build_daily_summary(df, scol):
 
 # ── Crew Metrics: site visit analysis ─────────────────────────────────────────
 
+def _count_billable_routes_from_df(df):
+    if df is None or df.empty:
+        return 0
+    loc_df = df[df["location"].astype(str).str.len() > 0].copy()
+    if loc_df.empty:
+        return 0
+    def _sa(chat):
+        _, is_sw, is_pl = _extract_crew_from_chat(chat)
+        if is_pl:
+            return "Parking Lot"
+        return "Sidewalk"
+    loc_df["_service_area"] = loc_df["chat"].apply(_sa)
+    dep_col = "deployment" if "deployment" in loc_df.columns else None
+    if dep_col:
+        routes = loc_df.groupby([dep_col, "location", "_service_area"]).ngroups
+    else:
+        routes = loc_df.groupby(["location", "_service_area"]).ngroups
+    return routes
+
+
 def _build_site_visits(df, scol):
     """Build a DataFrame of site visits from messages with locations.
 
@@ -3584,7 +3622,7 @@ def _build_deployment_summary_data(df):
         crews = grp["chat"].nunique()
         n_msgs = len(grp)
         visits_df = _build_site_visits(grp, "chat")
-        total_sites = len(visits_df)
+        total_sites = _count_billable_routes_from_df(grp)
         ds = _build_daily_summary(grp, "chat")
         sc = _build_crew_scorecard(visits_df, ds)
         avg_sites_hr = sc["avg_sites_per_hour"].mean() if not sc.empty else 0
@@ -3610,7 +3648,7 @@ def _build_deployment_summary_data(df):
             "Days": days,
             "Crews Active": crews,
             "Total Messages": n_msgs,
-            "Total Sites": total_sites,
+            "Billable Routes": total_sites,
             "Avg Sites/Hr": round(avg_sites_hr, 1),
             "Avg First Report": avg_first_str,
             "Avg Window (hrs)": avg_window,
@@ -4192,7 +4230,7 @@ def update_kpi_cards(chats, senders, quality, msg_types, time_range,
     visits_df = _build_site_visits(df, "chat")
     ds = _build_daily_summary(df, scol)
 
-    total_sites = len(visits_df)
+    total_sites = _count_billable_routes_from_df(df)
     avg_sites_hr = 0.0
     avg_trans = 0.0
     if not visits_df.empty:
@@ -4215,7 +4253,7 @@ def update_kpi_cards(chats, senders, quality, msg_types, time_range,
         ("Active Crews", str(active_crews), "#2ecc71"),
         ("Avg Sites/Hour", f"{avg_sites_hr:.1f}", "#e67e22"),
         ("Avg First Report", avg_first_str, "#9b59b6"),
-        ("Total Sites", f"{total_sites:,}", "#1abc9c"),
+        ("Billable Routes", f"{total_sites:,}", "#1abc9c"),
         ("Avg Transition", f"{avg_trans:.1f} min", "#e74c3c"),
     ]
 
@@ -5653,7 +5691,9 @@ def update_finances(active_tab, n_clicks, labor_sw, labor_pl, machine_rate,
                 {"name": "Type", "id": "type"},
                 {"name": "Tier", "id": "snow_tier"},
                 {"name": "Source", "id": "source"},
-                {"name": "Sites", "id": "sites_serviced", "type": "numeric"},
+                {"name": "Routes", "id": "total_sites", "type": "numeric"},
+                {"name": "SW", "id": "sw_routes", "type": "numeric"},
+                {"name": "PL", "id": "pl_routes", "type": "numeric"},
                 {"name": "Crews", "id": "crews", "type": "numeric"},
                 {"name": "Hours", "id": "hours", "type": "numeric"},
                 {"name": "Revenue", "id": "revenue", "type": "numeric"},
@@ -6086,9 +6126,18 @@ def reconcile_deployment(n_clicks, dep_label):
                       (DF_ALL["msg_date"] <= end + pd.Timedelta(days=1))]
     chat_locations = list(df_clean[df_clean["location"].str.len() > 0]["location"].unique()) if not df_clean.empty else []
 
+    job_logs = build_job_logs(df_clean, SNOW_CONFIG)
+    dep_routes = get_billable_routes_df(job_logs, deployment=dep_label) if not job_logs.empty else None
+
     results_children = []
     for inv in matched_invoices:
-        recon = reconcile_invoice_with_chat(inv, chat_locations, PRICING_INDEX, _normalize_location)
+        recon = reconcile_invoice_with_chat(inv, chat_locations, PRICING_INDEX, _normalize_location,
+                                            billable_routes=dep_routes)
+
+        route_info = ""
+        if recon.get("billable_routes_total", 0) > 0:
+            route_info = (f" | Billable Routes: {recon['billable_routes_total']} "
+                         f"(SW: {recon['sw_routes']}, PL: {recon['pl_routes']})")
 
         summary = dbc.Alert([
             html.Strong(f"{inv.get('filename', 'Invoice')} — {inv.get('deployment_type', '')}"),
@@ -6097,7 +6146,8 @@ def reconcile_deployment(n_clicks, dep_label):
                       f"Found in chat: {recon['sites_in_chat']} | "
                       f"Not in chat: {recon['sites_not_in_chat']} | "
                       f"Price mismatches: {recon['price_mismatches']} | "
-                      f"Chat but not invoiced: {recon['chat_not_invoiced_count']}"),
+                      f"Chat but not invoiced: {recon['chat_not_invoiced_count']}"
+                      f"{route_info}"),
         ], color="info" if recon["sites_not_in_chat"] == 0 else "warning", className="mb-2")
 
         issue_rows = [r for r in recon["line_items"] if r["status"] != "ok"]
@@ -6109,6 +6159,7 @@ def reconcile_deployment(n_clicks, dep_label):
                     {"name": "Billed", "id": "billed_amount", "type": "numeric"},
                     {"name": "Contract", "id": "contract_price", "type": "numeric"},
                     {"name": "In Chat?", "id": "in_chat_data"},
+                    {"name": "Service Areas", "id": "service_areas"},
                     {"name": "Status", "id": "status"},
                     {"name": "Notes", "id": "notes"},
                 ],

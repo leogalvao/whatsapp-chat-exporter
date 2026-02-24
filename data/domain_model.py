@@ -60,6 +60,52 @@ def build_location_coords(location_registry):
 CITY_AVG_SPEED_KMH = 25.0
 
 
+# ---------------------------------------------------------------------------
+# Billable Route utilities
+# ---------------------------------------------------------------------------
+
+def billable_route_key(deployment, location, service_area):
+    loc_norm = re.sub(r"[^a-z0-9 ]", "", str(location).lower().strip())
+    sa = str(service_area).strip() if service_area else "Unknown"
+    return f"{deployment}|{loc_norm}|{sa}"
+
+
+def count_billable_routes(job_logs_df, deployment=None):
+    if job_logs_df is None or job_logs_df.empty:
+        return 0
+    df = job_logs_df
+    if deployment:
+        df = df[df["deployment"] == deployment]
+    if df.empty:
+        return 0
+    routes = df.apply(
+        lambda r: billable_route_key(r.get("deployment", ""), r.get("location", ""), r.get("location_type", "")),
+        axis=1,
+    )
+    return routes.nunique()
+
+
+def get_billable_routes_df(job_logs_df, deployment=None):
+    if job_logs_df is None or job_logs_df.empty:
+        return pd.DataFrame(columns=["deployment", "location", "service_area", "route_key"])
+    df = job_logs_df.copy()
+    if deployment:
+        df = df[df["deployment"] == deployment]
+    if df.empty:
+        return pd.DataFrame(columns=["deployment", "location", "service_area", "route_key"])
+    df["route_key"] = df.apply(
+        lambda r: billable_route_key(r.get("deployment", ""), r.get("location", ""), r.get("location_type", "")),
+        axis=1,
+    )
+    routes = df.groupby("route_key").agg(
+        deployment=("deployment", "first"),
+        location=("location", "first"),
+        service_area=("location_type", "first"),
+        visits=("route_key", "size"),
+    ).reset_index()
+    return routes
+
+
 def estimate_travel_mins(distance_km, speed_kmh=None):
     if speed_kmh is None:
         speed_kmh = CITY_AVG_SPEED_KMH
@@ -268,7 +314,7 @@ def build_crew_summary(job_logs_df, config, location_coords=None):
 
     for crew, grp in trackable.groupby("crew"):
         days_active = grp["date"].dt.date.nunique()
-        total_sites = len(grp)
+        total_sites = count_billable_routes(grp)
         total_recalls = int(grp["is_recall"].sum())
 
         times = grp["picture_submitted_at"].dropna().sort_values()
@@ -457,7 +503,9 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
             continue
 
         dep_logs = dep_logs.sort_values("picture_submitted_at").reset_index(drop=True)
-        total_sites = len(dep_logs)
+        total_sites = count_billable_routes(dep_logs)
+        if total_sites == 0:
+            continue
         start_time = dep_logs["picture_submitted_at"].min()
 
         if pd.isna(start_time):

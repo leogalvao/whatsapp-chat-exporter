@@ -1,176 +1,47 @@
 # Snow Removal Deployment Tracker
 
 ## Overview
-A Python Dash web application that analyzes exported WhatsApp chat data with interactive charts and filters for snow removal field crew productivity tracking.
+This project is a Python Dash web application designed to analyze exported WhatsApp chat data. Its primary purpose is to provide interactive charts and filters for tracking the productivity of snow removal field crews. The application aims to offer insights into operational efficiency, financial performance, and crew activity, leveraging chat data to monitor deployments and identify areas for improvement.
 
-## Project Architecture
+## User Preferences
+The user prefers clear and concise information. The agent should focus on delivering functional code and avoid overly verbose explanations. Iterative development with regular check-ins for major architectural decisions is preferred. The user values maintainable and well-structured code.
 
-### Data Analysis (Python)
-- `data/dashboard_web.py` - **Main runnable**: Plotly Dash web dashboard (runs on port 5000)
-- `data/dashboard.py` - Matplotlib/Seaborn interactive dashboard (desktop only)
-- `data/analyze_chat.py` - CLI chat analysis and timeline plotting
+## System Architecture
 
-### Dependencies
-- Python 3.11
-- dash, dash-bootstrap-components
-- plotly, pandas, numpy
+### Data Analysis Core
+The application is built on Python 3.11, utilizing Plotly Dash for the web interface. Core data analysis is handled by modules responsible for chat analysis, timeline plotting, and generating interactive dashboards. A standalone domain model module (`data/domain_model.py`) encapsulates snow removal specific logic, including job log building, crew summaries, and deployment burndown. Configuration for deployment types, service times, and non-trackable senders is managed via `data/config/snow_removal.json`, while contract pricing is stored in `data/config/pricing.json`.
 
-### Domain Model (Snow Removal)
-- `data/domain_model.py` - Standalone domain model module (no Dash dependencies)
-  - Job log builder, crew summary, route segments, deployment burndown
-  - Location type stats, traffic analysis, delay report, recall detection
-  - Trackable sender filtering
-- `data/config/snow_removal.json` - Configuration for deployment types, location types, expected service times, non-trackable senders, standard travel times, finance config
-- `data/config/pricing.json` - Contract pricing data (695 sites with tiered snow removal prices)
+### Dashboard Structure and Features
+The web dashboard is organized into 9 main tabs:
+- **Overview**: Message volume, activity heatmaps, daily timelines.
+- **Productivity**: Daily scores, crew leaderboard, idle time detection.
+- **Crew Analysis**: Per-sender metrics, message gaps, route timelines.
+- **Deployments**: Summary, timeline, cross-deployment comparison, downloadable HTML reports, breakdown with crew-location reassignment.
+- **Operations**: Routing Gantt chart, deployment burn-down, traffic analysis, recall detection.
+- **Finances**: Revenue forecasting, cost analysis, profit metrics, invoice reconciliation.
+- **Map**: DC Service Map with OpenStreetMap tiles, location color-coding by crew, deployment filtering.
+- **Data Quality**: Noise filtering, raw message data.
+- **Settings**: Crew assignment configuration, sender management, expected hours, service times, location registry upload, invoice upload.
 
-## Dashboard Structure
-The dashboard has 9 tabs:
-1. **Overview** - Message volume, types, activity heatmap, sender participation, daily timeline
-2. **Productivity** - Daily productivity scores, crew leaderboard with rankings, first report times, reporting windows, idle time detection, daily message trends
-3. **Crew Analysis** - Per-sender metrics, message gaps, crew scorecards, sites/hour, transition times, route timelines, pace consistency, top locations
-4. **Deployments** - Deployment summary, timeline, cross-deployment comparison, performance trends, sites heatmap, downloadable HTML reports, deployment breakdown with crew-location reassignment
-5. **Operations** - Routing Gantt chart, deployment burn-down (actual vs 12hr expected pace), location type performance, traffic analysis, delay report, recall summary
-6. **Finances** - Revenue forecasting, cost analysis, profit metrics from contract pricing cross-referenced with operational data
-7. **Map** - DC Service Map with OpenStreetMap tiles, DC boundary polygon from ArcGIS API, location dots color-coded by crew, marker size by visit frequency, deployment filter
-8. **Data Quality** - Noise filtering overview, raw message data table
-9. **Settings** - Crew location type assignment (Sidewalk/Parking Lot), non-trackable sender management, expected deployment hours, service time configuration, location registry upload
+Key dashboard features include:
+- A persistent KPI summary bar.
+- Collapsible sidebar filters for granular data selection.
+- A weighted productivity scoring system.
+- Billable route model: DeploymentID + LocationID + ServiceArea combinations (not just unique addresses).
+- Detection of idle time and recall events.
+- Automatic location type inference and trackable sender filtering.
+- Deployment burn-down charts scaled by crew size.
+- Crew merging capabilities for consistent tracking.
+- Drag-and-drop file upload for various data formats.
+- Distance-based travel efficiency analysis.
+- Location registry with fuzzy matching and map integration.
+- Invoice reconciliation with SW/PL split validation.
 
-### Key Dashboard Features
-- **KPI Summary Bar**: Always-visible row of 6 metric cards (Total Messages, Active Crews, Avg Sites/Hour, Avg First Report, Total Sites, Avg Transition)
-- **Collapsible Sidebar Filters**: Accordion-style with People & Chats, Time & Dates, Message Filters sections
-- **Productivity Score**: Weighted composite (50% pace + 30% punctuality + 20% coverage) per crew per day
-- **Crew Leaderboard**: Ranked table with trend indicators (improving/declining/stable)
-- **Idle Time Detection**: Flags gaps > 45 minutes between consecutive messages
-- **Recall Detection**: Flags when crews return to previously-visited locations, tracks added time
-- **Location Type Auto-Detection**: Infers Sidewalk/Parking Lot from chat names
-- **Trackable Sender Filtering**: Excludes non-trackable senders from Operations KPIs
-- **Deployment Burn-Down**: Compares actual site completion pace vs expected (configurable, default 12hr)
-- **Crew Merge**: Merge two crews that are the same team under different chat names across deployments; persists to config and applies on reload; undo-able
-- **File Upload**: Drag-and-drop JSON files or upload entire folders
-- **Deployment Reports**: Downloadable HTML reports with all deployment charts
+### Supported Data Formats
+The application supports multiple JSON data formats for chat exports, including unified multi-chat exports, legacy per-chat exports, pre-computed metrics (`metrics_report.json`), and automatically skips OCR dispatch data (`_dispatches.json`). It also includes robust handling for a new `v2 CrewChatData` format, supporting message-level deduplication and detailed message attributes.
 
-## Running
-The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads JSON exports from the `data/` directory.
+## External Dependencies
 
-## Data Files
-JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
-
-### Supported File Formats
-1. **Combined_Messages.json** — Unified multi-chat export (Gemini-cleaned). Single file with all chats; each message has a `chatName` field. Auto-detected by per-message chatName presence.
-2. **Legacy per-chat exports** — Individual WhatsApp JSON files each with `exportInfo.chatName` and `messages` array.
-3. **metrics_report.json** — Pre-computed metrics with `summary`, `crew_metrics`, `daily_breakdown`, `productivity_scores`, `site_visits`.
-4. **_dispatches.json** — OCR dispatch correlation data (auto-skipped during chat discovery).
-
-## Recent Changes
-- 2026-02-24: Invoice Excel import with reconciliation and completion verification
-  - Invoice parser (data/invoice_parser.py) supporting 3 auto-detected formats: simple billing, pre-treatment reports, completion reports
-  - Auto-detects deployment type (Snow Removal, Ice Removal, Pre-Treatment, Snow Melt) from filename/title priority, then headers
-  - Auto-detects snow tier from price column headers (Melt Only, <6", 6"-12", 12"-24")
-  - Date extraction from filenames (e.g., 2026-01-26_-_Snow_Removal.xlsx)
-  - Invoice upload UI in Settings tab with drag-and-drop, preview table, and deployment auto-matching (3-day tolerance)
-  - Invoice data stored in snow_removal.json["invoices"], matched to deployments by date
-  - Invoice reconciliation: compares billed sites vs chat-tracked sites, flags discrepancies (missing from chat, missing from invoice)
-  - Completion verification: cross-references portal completion reports (crew assignments, timestamps, pct_completed) with chat data
-  - Per-deployment labor cost overrides: editable DataTable for labor rate, workers, hours per crew per deployment
-  - Labor overrides persist to snow_removal.json["labor_overrides"] and apply during financial recalculation
-  - _compute_financials uses actual invoice revenue when available, falls back to contract pricing estimates
-  - Deployment financials table shows Type, Tier, Source (Invoice/Estimated) columns
-  - Pricing data cross-referenced via normalized location matching (_normalize_location)
-- 2026-02-24: Deployment breakdown with crew-location reassignment and map deployment filter
-  - Deployment Breakdown section on Deployments tab: select a deployment to see all serviced locations
-  - Auto-detected crew assignments shown alongside editable dropdown overrides (Sidewalk/Parking Lot crews)
-  - Crew reassignment persists to snow_removal.json via Save button
-  - Map tab: deployment filter dropdown filters displayed locations to those active in selected deployment
-  - Map title updates to show deployment name and site count when filtered
-  - Visit counts recalculated per deployment for marker sizing
-- 2026-02-24: Finances tab with contract pricing cross-reference
-  - Imported 695-site contract pricing from Excel proposal (4 snow depth tiers)
-  - Pricing stored in data/config/pricing.json, matched to serviced locations by normalized address/name
-  - 8 KPI cards: Total Revenue, Total Costs, Profit, Margin %, Sites Matched, Salt Used (lbs), Cost/Hour, Rev/Deployment
-  - Crew-type-aware costing: separate sidewalk vs parking lot labor rates, worker counts, salt usage
-  - Parking lot crews capped at 2 workers (truck-based), sidewalk crews configurable worker count
-  - Machine cost for parking lot crews (hourly rate), material/salt cost by crew type
-  - Overhead % applied to direct costs (labor + machine + material)
-  - Editable cost inputs: sidewalk labor $/hr, parking labor $/hr, machine $/hr, salt $/lb, salt lbs/site (SW/PL), workers (SW/PL), overhead %, snow tier
-  - Selectable default snow tier (Melt Only, <6", 6"-12", 12"-24")
-  - Per-deployment financials table (revenue, labor, machine, salt, overhead, profit, margin, salt lbs)
-  - Per-crew financials table (type, workers, sites, hours, revenue, labor, machine, profit, $/hour)
-  - Revenue vs Costs grouped bar chart by deployment (revenue, labor, machine, salt, profit)
-  - Finance config persists to snow_removal.json; recalculate button for live adjustments
-  - Non-trackable senders excluded from all financial calculations
-- 2026-02-24: v2 CrewChatData format support
-  - Auto-detects new JSON format with id, isOutgoing, isForwarded, isDeleted, media details
-  - isDeleted messages classified as "deleted" noise type (filtered from clean metrics)
-  - Message-level deduplication via id field (prevents inflated counts from re-exports)
-  - New DataFrame columns: msg_id, is_outgoing, is_forwarded, is_deleted, has_media, media_type, media_file
-  - _dispatches.json files (OCR dispatch data) automatically skipped during discovery
-  - Backward compatible: legacy exports without new fields continue to work unchanged
-- 2026-02-23: Crew-size-adjusted burn-down curves
-  - Burn-down expected pace now scaled by crew count per deployment
-  - Formula: adjusted_hours = expected_hours / crew_count (more crews = steeper expected curve)
-  - Crew count auto-detected from unique crews (chats) active in each deployment
-  - Legend shows crew count, total sites, and adjusted expected hours per deployment
-  - Enables fair comparison: same-size deployments with more crews expected to finish faster
-- 2026-02-23: Distance-based travel efficiency analysis
-  - Haversine distance calculation between locations using registry coordinates
-  - Route segments now include distance_km, estimated_travel_mins (25 km/h city speed), and travel_efficiency %
-  - Traffic analysis table shows distance, estimated travel time, and efficiency with color coding (red < 50%, green >= 80%)
-  - Scatter plot: Actual Travel Time vs Distance with expected baseline (25 km/h)
-  - Gantt chart hover tooltips show distance, duration, and efficiency per segment
-  - build_crew_summary passes location_coords through to route segments
-- 2026-02-23: Added Location Registry and Map tab
-  - Location CSV upload in Settings (supports routes format: Building Name, Billing Street, Crew Sidewalk, Crew Parking Lot)
-  - Also supports legacy format: location_name, address, lat, lon
-  - Fuzzy matching with exact/substring/abbreviation-based matching and confidence scores
-  - Auto-assign crews button: analyzes chat data to determine which crew services each location
-  - Separate Crew Sidewalk and Crew Parking Lot columns (both editable for manual overrides)
-  - New Map tab with DC boundary from ArcGIS API (cached locally)
-  - OpenStreetMap tiles, location dots color-coded by crew, marker size by visit frequency
-  - DC boundary polygon from data/config/dc_boundary.json
-  - Location registry persisted in data/config/snow_removal.json
-- 2026-02-23: Fixed CSV and JSON export endpoints
-  - Fixed KeyError on 'coverage' column missing from productivity score DataFrame
-  - Added coverage column to _build_daily_productivity_score output
-  - Fixed unsafe date.date() calls on string values causing AttributeError
-  - Added non-trackable sender filtering to export data (matches dashboard filtering)
-  - Added missing CSV sections: Transitions, Recalls, Location Type Stats
-  - Wrapped export endpoint in try/except for graceful error handling
-- 2026-02-23: Non-trackable sender filtering applied globally
-  - Non-trackable senders now excluded from ALL metrics (KPIs, Overview, Productivity, Crew Analysis, Deployments, Operations)
-  - Filtering applied centrally in get_filtered_df so all callbacks automatically exclude non-trackable senders
-  - Sender dropdowns in sidebar no longer show non-trackable senders
-  - Removed redundant filter_trackable calls from Operations callbacks
-  - Settings tab still shows all senders for non-trackable management
-- 2026-02-23: Defensive error handling for all callbacks
-  - All Operations callbacks wrapped with try/except (routing gantt, burndown, location type stats, traffic analysis, delay report, recall summary)
-  - chart-sender-chat callback wrapped with error handling and limited to top 50 combinations
-  - Domain model build_job_logs validates required columns before processing
-  - All errors logged to console with descriptive prefixes for debugging
-  - Callbacks return empty figures/placeholders on error instead of crashing
-- 2026-02-23: Settings tab and cleanup
-  - Added Settings tab with crew location type assignment (Sidewalk/Parking Lot/Auto-detect)
-  - Added non-trackable sender management via checkboxes
-  - Added expected deployment hours and service time configuration
-  - Settings persist to data/config/snow_removal.json
-  - Removed Chrome extension files (no longer used)
-- 2026-02-23: Snow Removal Operations integration
-  - Created domain model module (data/domain_model.py) with formalized entities
-  - Added configuration system (data/config/snow_removal.json)
-  - New Operations tab with 6 sections: Routing Gantt, Burn-Down, Location Type Performance, Traffic Analysis, Delay Report, Recall Summary
-  - Recall detection system flagging crews returning to previously-visited locations
-  - Trackable sender filtering applied to all Operations KPIs
-  - Route segments include actual start/end timestamps for accurate Gantt charts
-  - Burndown uses configurable expected_deployment_hours from config
-  - Export API includes recalls and location type stats
-- 2026-02-23: Major dashboard restructuring
-  - Reorganized from 7 tabs to 5 (Overview, Productivity, Crew Analysis, Deployments, Data Quality)
-  - Added KPI summary bar with 6 at-a-glance metric cards
-  - Added productivity scoring system with weighted daily scores
-  - Added crew leaderboard with trend indicators
-  - Added idle time detection (gaps > 45 min)
-  - Made sidebar collapsible with accordion sections
-  - Added section headers with descriptions to each tab
-  - Fixed chart-sender-chat ValueError with uniform data
-- 2026-02-23: Imported from GitHub, configured for Replit environment
-  - Changed dashboard port from 8050 to 5000
-  - Added empty data handling so dashboard starts without JSON files
+- **Python Libraries**: `dash`, `dash-bootstrap-components`, `plotly`, `pandas`, `numpy`.
+- **Mapping Services**: OpenStreetMap for map tiles, ArcGIS API for DC boundary polygon data.
+- **Data Storage**: Configuration and pricing data are stored in JSON files (`data/config/snow_removal.json`, `data/config/pricing.json`).
