@@ -6233,7 +6233,10 @@ def _render_invoice_list(invoices_registry):
         split_info = ""
         iid = inv.get("invoice_id", "")
         if "_split_" in iid:
-            split_info = f"Split from {iid.split('_split_')[0]}"
+            days = inv.get("split_days", "")
+            frac = inv.get("split_fraction", 0)
+            pct = f"{frac*100:.0f}%" if frac else ""
+            split_info = f"{iid.split('_split_')[0]} ({days}d {pct})" if days else f"Split from {iid.split('_split_')[0]}"
         rows.append({
             "invoice_id": iid,
             "filename": inv.get("filename", ""),
@@ -6288,7 +6291,9 @@ def _render_invoice_list(invoices_registry):
 
     split_section = html.Div([
         html.Hr(),
-        html.H6("Split Invoice Across Deployments", className="mt-3"),
+        html.H6("Split Invoice Across Deployments (by dates)", className="mt-3"),
+        html.P("Split by date ranges — costs and sites are allocated proportionally by number of days.",
+               className="text-muted small mb-2"),
         dbc.Row([
             dbc.Col([
                 dbc.Label("Invoice ID", size="sm"),
@@ -6296,11 +6301,11 @@ def _render_invoice_list(invoices_registry):
             ], md=3),
             dbc.Col([
                 dbc.Label("Deployment Labels (comma-separated)", size="sm"),
-                dbc.Input(id="invoice-split-deps", placeholder="e.g. Jan 25 Snow, Jan 26 Snow", size="sm"),
+                dbc.Input(id="invoice-split-deps", placeholder="e.g. Feb 21–22, Feb 23–24", size="sm"),
             ], md=4),
             dbc.Col([
-                dbc.Label("Percentages (comma-separated)", size="sm"),
-                dbc.Input(id="invoice-split-pcts", placeholder="e.g. 60, 40", size="sm"),
+                dbc.Label("Date Ranges (comma-separated)", size="sm"),
+                dbc.Input(id="invoice-split-dates", placeholder="e.g. 2/21-2/22, 2/23-2/24", size="sm"),
             ], md=3),
             dbc.Col([
                 dbc.Button("Split", id="invoice-split-btn", color="warning", size="sm", className="mt-4"),
@@ -6369,18 +6374,40 @@ def save_invoice_edits(n_clicks, table_data):
     )
 
 
+def _parse_date_range(date_str):
+    date_str = date_str.strip()
+    parts = [p.strip() for p in date_str.split("-")]
+    if len(parts) == 2:
+        try:
+            start = pd.Timestamp(parts[0])
+            end = pd.Timestamp(parts[1])
+            if end.year == 1970 and start.year > 1970:
+                end = end.replace(year=start.year)
+            if start.month > end.month:
+                end = end.replace(year=start.year + 1)
+            days = max((end - start).days + 1, 1)
+            return start, end, days
+        except Exception:
+            pass
+    try:
+        dt = pd.Timestamp(date_str)
+        return dt, dt, 1
+    except Exception:
+        return None, None, 0
+
+
 @app.callback(
     [Output("invoice-split-status", "children"),
      Output("invoice-list-container", "children", allow_duplicate=True)],
     Input("invoice-split-btn", "n_clicks"),
     State("invoice-split-id", "value"),
     State("invoice-split-deps", "value"),
-    State("invoice-split-pcts", "value"),
+    State("invoice-split-dates", "value"),
     prevent_initial_call=True,
 )
-def split_invoice(n_clicks, inv_id, deps_str, pcts_str):
+def split_invoice(n_clicks, inv_id, deps_str, dates_str):
     global SNOW_CONFIG
-    if not n_clicks or not inv_id or not deps_str or not pcts_str:
+    if not n_clicks or not inv_id or not deps_str or not dates_str:
         raise PreventUpdate
 
     invoices_registry = SNOW_CONFIG.get("invoices", [])
@@ -6393,29 +6420,39 @@ def split_invoice(n_clicks, inv_id, deps_str, pcts_str):
         return html.Span(f"Invoice ID '{inv_id}' not found.", style={"color": "red"}), no_update
 
     deps = [d.strip() for d in deps_str.split(",") if d.strip()]
-    try:
-        pcts = [float(p.strip()) for p in pcts_str.split(",") if p.strip()]
-    except ValueError:
-        return html.Span("Invalid percentages. Use numbers separated by commas.", style={"color": "red"}), no_update
+    date_ranges_raw = [d.strip() for d in dates_str.split(",") if d.strip()]
 
-    if len(deps) != len(pcts):
-        return html.Span("Number of deployments must match number of percentages.", style={"color": "red"}), no_update
+    if len(deps) != len(date_ranges_raw):
+        return html.Span(
+            f"Number of deployments ({len(deps)}) must match number of date ranges ({len(date_ranges_raw)}).",
+            style={"color": "red"}), no_update
 
-    total_pct = sum(pcts)
-    if abs(total_pct - 100) > 1:
-        return html.Span(f"Percentages must sum to 100 (got {total_pct}).", style={"color": "red"}), no_update
+    date_ranges = []
+    for dr in date_ranges_raw:
+        start, end, days = _parse_date_range(dr)
+        if days == 0:
+            return html.Span(f"Invalid date range: '{dr}'. Use format like 2/21-2/22 or 2/21.",
+                             style={"color": "red"}), no_update
+        date_ranges.append((start, end, days))
+
+    total_days = sum(d[2] for d in date_ranges)
+    if total_days == 0:
+        return html.Span("Total days is zero — check date ranges.", style={"color": "red"}), no_update
 
     new_records = []
     orig_total = source.get("total_billed", 0)
     orig_sites = source.get("site_count", 0)
     running_total = 0.0
     running_sites = 0
-    for i, (dep_label, pct) in enumerate(zip(deps, pcts)):
-        fraction = pct / 100.0
+    for i, (dep_label, (start, end, days)) in enumerate(zip(deps, date_ranges)):
+        fraction = days / total_days
         new_inv = dict(source)
         new_inv.pop("line_items", None)
         new_inv["invoice_id"] = f"{inv_id.strip()}_split_{i}"
         new_inv["matched_deployment"] = dep_label
+        new_inv["deployment_date"] = f"{start.strftime('%m/%d')}-{end.strftime('%m/%d')}" if start != end else start.strftime('%m/%d')
+        new_inv["split_days"] = days
+        new_inv["split_fraction"] = round(fraction, 4)
         if i == len(deps) - 1:
             new_inv["total_billed"] = round(orig_total - running_total, 2)
             new_inv["site_count"] = orig_sites - running_sites
@@ -6440,8 +6477,10 @@ def split_invoice(n_clicks, inv_id, deps_str, pcts_str):
     except Exception as e:
         return html.Span(f"Save error: {e}", style={"color": "red"}), no_update
 
+    day_details = ", ".join(f"{d}: {dr[2]}d ({dr[2]/total_days*100:.0f}%)" for d, dr in zip(deps, date_ranges))
     return (
-        html.Span(f"Split invoice {inv_id} into {len(new_records)} records.", style={"color": "green"}),
+        html.Span(f"Split invoice {inv_id} into {len(new_records)} records by dates ({total_days} total days): {day_details}",
+                  style={"color": "green"}),
         _render_invoice_list(SNOW_CONFIG.get("invoices", []))
     )
 
