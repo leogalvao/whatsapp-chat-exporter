@@ -1825,13 +1825,13 @@ main_content = dbc.Tabs(
             dbc.Row([
                 dbc.Col([
                     html.H5("Invoice Import", className="mb-2"),
-                    html.P("Upload deployment invoice Excel files (.xlsx). Each invoice is matched to a deployment by date. "
+                    html.P("Upload deployment invoice files (.xlsx or .csv). Each invoice is matched to a deployment by date. "
                            "Supports snow removal, ice removal, and pre-treatment formats.",
                            className="text-muted mb-2", style={"fontSize": "13px"}),
                     dcc.Upload(
                         id="upload-invoice",
                         children=html.Div([
-                            "Drag & drop invoice .xlsx files here, or ",
+                            "Drag & drop invoice .xlsx or .csv files here, or ",
                             html.A("click to browse", className="text-primary fw-bold"),
                         ], style={"lineHeight": "40px"}),
                         style={

@@ -1,6 +1,6 @@
-"""Invoice Excel parser for Snow Removal Deployment Tracking.
+"""Invoice parser for Snow Removal Deployment Tracking.
 
-Supports three invoice formats:
+Supports Excel (.xlsx) and CSV (.csv) invoice files with three formats:
 1. Simple billing: BUILDING NAME, Ward, Service Area, Billing Street, Price column
 2. Pre-treatment report: Snow Priority, Building Name, Billing Street, Ward, crew/completion fields
 3. Completion report: Building Name, Billing Street, Ward, crew assignments, timestamps, verification
@@ -8,6 +8,8 @@ Supports three invoice formats:
 Auto-detects format from column headers.
 """
 
+import csv
+import io
 import os
 import re
 from datetime import datetime
@@ -125,179 +127,242 @@ def _find_price_col(headers):
     return None
 
 
-def parse_invoice(filepath, filename=None):
-    if filename is None:
-        filename = os.path.basename(filepath)
+def _read_rows_from_csv(filepath_or_text, is_text=False):
+    if is_text:
+        lines = filepath_or_text
+    else:
+        with open(filepath_or_text, "r", encoding="utf-8-sig") as f:
+            lines = f.read()
 
+    reader = csv.reader(io.StringIO(lines))
+    all_rows = []
+    for row in reader:
+        converted = []
+        for cell in row:
+            cell = cell.strip() if cell else None
+            if cell is None or cell == "":
+                converted.append(None)
+            else:
+                try:
+                    converted.append(float(cell))
+                except ValueError:
+                    converted.append(cell)
+        all_rows.append(converted)
+    return all_rows
+
+
+def _read_rows_from_excel(filepath):
     wb = openpyxl.load_workbook(filepath, data_only=True)
-    results = []
-
+    sheets = {}
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         if ws.max_row < 2:
             continue
-
-        all_rows = []
+        rows = []
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row, values_only=True):
-            all_rows.append(list(row))
+            rows.append(list(row))
+        if rows:
+            sheets[sheet_name] = rows
+    return sheets
 
-        if not all_rows:
+
+def parse_invoice(filepath, filename=None):
+    if filename is None:
+        filename = os.path.basename(filepath)
+
+    ext = os.path.splitext(filename or filepath)[1].lower()
+    if ext == ".csv":
+        all_rows = _read_rows_from_csv(filepath)
+        sheets_data = {"Sheet1": all_rows} if all_rows else {}
+    else:
+        sheets_data = _read_rows_from_excel(filepath)
+
+    results = []
+    for sheet_name, all_rows in sheets_data.items():
+        if len(all_rows) < 2:
+            continue
+        results.extend(_parse_sheet_rows(all_rows, sheet_name, filename))
+    return results
+
+
+def _parse_sheet_rows(all_rows, sheet_name, filename):
+    results = []
+
+    title_row = None
+    header_row_idx = None
+    for i, row in enumerate(all_rows):
+        vals = [v for v in row if v is not None]
+        if not vals:
+            continue
+        non_none_count = len(vals)
+        has_building = any("building" in _normalize(str(v)) for v in vals)
+        has_billing = any("billing" in _normalize(str(v)) for v in vals)
+        has_ward = any("ward" in _normalize(str(v)) for v in vals)
+
+        if (has_building or has_billing) and (has_ward or non_none_count >= 4):
+            header_row_idx = i
+            break
+        elif non_none_count <= 2 and i == 0:
+            title_row = str(vals[0]) if vals else None
+
+    if header_row_idx is None:
+        return results
+
+    headers = all_rows[header_row_idx]
+    fmt = _detect_format(headers)
+    dep_type = _detect_deployment_type(headers, title_row, filename)
+    snow_tier = _detect_snow_tier(headers, title_row)
+    dep_date = _detect_date_from_filename(filename)
+
+    col_map = {}
+    for i, h in enumerate(headers):
+        if not h:
+            continue
+        h_norm = _normalize(str(h))
+        if "building" in h_norm and "name" in h_norm:
+            col_map["building_name"] = i
+        elif "building name" in h_norm:
+            col_map["building_name"] = i
+        elif "billing" in h_norm and "street" in h_norm:
+            col_map["address"] = i
+        elif "ward" in h_norm:
+            col_map["ward"] = i
+        elif "service area" in h_norm:
+            col_map["service_area"] = i
+        elif "snow priority" in h_norm:
+            col_map["snow_priority"] = i
+        elif "percentage completed" in h_norm:
+            col_map["pct_completed"] = i
+        elif "deployed removal crew" in h_norm:
+            col_map["removal_crew"] = i
+        elif "deployed pretreatment crew" in h_norm:
+            col_map["pretreatment_crew"] = i
+        elif "created by" in h_norm:
+            col_map["created_by"] = i
+        elif "created date" in h_norm or "time created" in h_norm:
+            col_map["created_time"] = i
+        elif "sidewalks pretreated" in h_norm:
+            col_map["sidewalks_pretreated"] = i
+        elif "parking lots pretreated" in h_norm:
+            col_map["parking_pretreated"] = i
+        elif "verification status" in h_norm:
+            col_map["verification_status"] = i
+        elif "verification comment" in h_norm:
+            col_map["verification_comments"] = i
+        elif "parking lots cleared" in h_norm or "parking" in h_norm and "cleared" in h_norm:
+            col_map["parking_cleared"] = i
+        elif "side walks cleared" in h_norm or "sidewalk" in h_norm and "cleared" in h_norm:
+            col_map["sidewalks_cleared"] = i
+        elif "ice melt" in h_norm and "applied" in h_norm:
+            col_map["ice_melt_applied"] = i
+        elif "snow  ice removal" in h_norm or "snow ice removal" in h_norm:
+            col_map["snow_removal_id"] = i
+
+    price_col = _find_price_col(headers)
+
+    line_items = []
+    for row in all_rows[header_row_idx + 1:]:
+        if not any(v is not None for v in row):
             continue
 
-        title_row = None
-        header_row_idx = None
-        for i, row in enumerate(all_rows):
-            vals = [v for v in row if v is not None]
-            if not vals:
-                continue
-            non_none_count = len(vals)
-            has_building = any("building" in _normalize(str(v)) for v in vals)
-            has_billing = any("billing" in _normalize(str(v)) for v in vals)
-            has_ward = any("ward" in _normalize(str(v)) for v in vals)
+        bname_idx = col_map.get("building_name")
+        if bname_idx is not None and bname_idx < len(row):
+            building_name = str(row[bname_idx]).strip() if row[bname_idx] else ""
+        else:
+            building_name = str(row[0]).strip() if row and row[0] else ""
 
-            if (has_building or has_billing) and (has_ward or non_none_count >= 4):
-                header_row_idx = i
-                break
-            elif non_none_count <= 2 and i == 0:
-                title_row = str(vals[0]) if vals else None
-
-        if header_row_idx is None:
+        if not building_name:
             continue
 
-        headers = all_rows[header_row_idx]
-        fmt = _detect_format(headers)
-        dep_type = _detect_deployment_type(headers, title_row, filename)
-        snow_tier = _detect_snow_tier(headers, title_row)
-        dep_date = _detect_date_from_filename(filename)
+        skip_keywords = ["total", "subtotal", "grand total", "t&m", "additional time"]
+        if any(k in building_name.lower() for k in skip_keywords):
+            continue
 
-        col_map = {}
-        for i, h in enumerate(headers):
-            if not h:
-                continue
-            h_norm = _normalize(str(h))
-            if "building" in h_norm and "name" in h_norm:
-                col_map["building_name"] = i
-            elif "building name" in h_norm:
-                col_map["building_name"] = i
-            elif "billing" in h_norm and "street" in h_norm:
-                col_map["address"] = i
-            elif "ward" in h_norm:
-                col_map["ward"] = i
-            elif "service area" in h_norm:
-                col_map["service_area"] = i
-            elif "snow priority" in h_norm:
-                col_map["snow_priority"] = i
-            elif "percentage completed" in h_norm:
-                col_map["pct_completed"] = i
-            elif "deployed removal crew" in h_norm:
-                col_map["removal_crew"] = i
-            elif "deployed pretreatment crew" in h_norm:
-                col_map["pretreatment_crew"] = i
-            elif "created by" in h_norm:
-                col_map["created_by"] = i
-            elif "created date" in h_norm or "time created" in h_norm:
-                col_map["created_time"] = i
-            elif "sidewalks pretreated" in h_norm:
-                col_map["sidewalks_pretreated"] = i
-            elif "parking lots pretreated" in h_norm:
-                col_map["parking_pretreated"] = i
-            elif "verification status" in h_norm:
-                col_map["verification_status"] = i
-            elif "verification comment" in h_norm:
-                col_map["verification_comments"] = i
-            elif "parking lots cleared" in h_norm or "parking" in h_norm and "cleared" in h_norm:
-                col_map["parking_cleared"] = i
-            elif "side walks cleared" in h_norm or "sidewalk" in h_norm and "cleared" in h_norm:
-                col_map["sidewalks_cleared"] = i
-            elif "ice melt" in h_norm and "applied" in h_norm:
-                col_map["ice_melt_applied"] = i
-            elif "snow  ice removal" in h_norm or "snow ice removal" in h_norm:
-                col_map["snow_removal_id"] = i
+        item = {"building_name": building_name}
 
-        price_col = _find_price_col(headers)
+        addr_idx = col_map.get("address")
+        if addr_idx is not None and addr_idx < len(row) and row[addr_idx]:
+            item["address"] = str(row[addr_idx]).strip()
 
-        line_items = []
-        for row in all_rows[header_row_idx + 1:]:
-            if not any(v is not None for v in row):
-                continue
+        ward_idx = col_map.get("ward")
+        if ward_idx is not None and ward_idx < len(row) and row[ward_idx]:
+            item["ward"] = str(row[ward_idx]).strip()
 
-            bname_idx = col_map.get("building_name")
-            if bname_idx is not None and bname_idx < len(row):
-                building_name = str(row[bname_idx]).strip() if row[bname_idx] else ""
-            else:
-                building_name = str(row[0]).strip() if row and row[0] else ""
+        sa_idx = col_map.get("service_area")
+        if sa_idx is not None and sa_idx < len(row) and row[sa_idx]:
+            item["service_area"] = str(row[sa_idx]).strip()
 
-            if not building_name:
-                continue
+        if price_col is not None and price_col < len(row) and row[price_col] is not None:
+            try:
+                item["billed_amount"] = float(row[price_col])
+            except (ValueError, TypeError):
+                pass
 
-            item = {"building_name": building_name}
+        prio_idx = col_map.get("snow_priority")
+        if prio_idx is not None and prio_idx < len(row) and row[prio_idx]:
+            try:
+                item["snow_priority"] = int(row[prio_idx])
+            except (ValueError, TypeError):
+                item["snow_priority"] = str(row[prio_idx])
 
-            addr_idx = col_map.get("address")
-            if addr_idx is not None and addr_idx < len(row) and row[addr_idx]:
-                item["address"] = str(row[addr_idx]).strip()
+        for field in ["removal_crew", "pretreatment_crew", "created_by", "created_time",
+                      "pct_completed", "verification_status", "verification_comments",
+                      "sidewalks_pretreated", "parking_pretreated",
+                      "sidewalks_cleared", "parking_cleared", "ice_melt_applied"]:
+            idx = col_map.get(field)
+            if idx is not None and idx < len(row) and row[idx] is not None:
+                val = row[idx]
+                if isinstance(val, (int, float)):
+                    item[field] = val
+                else:
+                    item[field] = str(val).strip()
 
-            ward_idx = col_map.get("ward")
-            if ward_idx is not None and ward_idx < len(row) and row[ward_idx]:
-                item["ward"] = str(row[ward_idx]).strip()
+        line_items.append(item)
 
-            sa_idx = col_map.get("service_area")
-            if sa_idx is not None and sa_idx < len(row) and row[sa_idx]:
-                item["service_area"] = str(row[sa_idx]).strip()
-
-            if price_col is not None and price_col < len(row) and row[price_col] is not None:
-                try:
-                    item["billed_amount"] = float(row[price_col])
-                except (ValueError, TypeError):
-                    pass
-
-            prio_idx = col_map.get("snow_priority")
-            if prio_idx is not None and prio_idx < len(row) and row[prio_idx]:
-                try:
-                    item["snow_priority"] = int(row[prio_idx])
-                except (ValueError, TypeError):
-                    item["snow_priority"] = str(row[prio_idx])
-
-            for field in ["removal_crew", "pretreatment_crew", "created_by", "created_time",
-                          "pct_completed", "verification_status", "verification_comments",
-                          "sidewalks_pretreated", "parking_pretreated",
-                          "sidewalks_cleared", "parking_cleared", "ice_melt_applied"]:
-                idx = col_map.get(field)
-                if idx is not None and idx < len(row) and row[idx] is not None:
-                    val = row[idx]
-                    if isinstance(val, (int, float)):
-                        item[field] = val
-                    else:
-                        item[field] = str(val).strip()
-
-            line_items.append(item)
-
-        if line_items:
-            total_billed = sum(it.get("billed_amount", 0) for it in line_items)
-            results.append({
-                "filename": filename,
-                "sheet": sheet_name,
-                "format": fmt,
-                "deployment_type": dep_type,
-                "snow_tier": snow_tier,
-                "deployment_date": dep_date,
-                "title": title_row,
-                "total_billed": round(total_billed, 2),
-                "site_count": len(line_items),
-                "line_items": line_items,
-            })
+    if line_items:
+        total_billed = sum(it.get("billed_amount", 0) for it in line_items)
+        results.append({
+            "filename": filename,
+            "sheet": sheet_name,
+            "format": fmt,
+            "deployment_type": dep_type,
+            "snow_tier": snow_tier,
+            "deployment_date": dep_date,
+            "title": title_row,
+            "total_billed": round(total_billed, 2),
+            "site_count": len(line_items),
+            "line_items": line_items,
+        })
 
     return results
 
 
 def parse_invoice_bytes(content_bytes, filename):
     import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-        tmp.write(content_bytes)
-        tmp_path = tmp.name
-    try:
-        return parse_invoice(tmp_path, filename)
-    finally:
-        os.unlink(tmp_path)
+    ext = os.path.splitext(filename)[1].lower() if filename else ".xlsx"
+    if ext == ".csv":
+        try:
+            text = content_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content_bytes.decode("latin-1")
+        all_rows = _read_rows_from_csv(text, is_text=True)
+        if not all_rows:
+            return []
+        sheets_data = {"Sheet1": all_rows}
+        results = []
+        for sheet_name, rows in sheets_data.items():
+            if len(rows) < 2:
+                continue
+            results.extend(_parse_sheet_rows(rows, sheet_name, filename))
+        return results
+    else:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(content_bytes)
+            tmp_path = tmp.name
+        try:
+            return parse_invoice(tmp_path, filename)
+        finally:
+            os.unlink(tmp_path)
 
 
 def match_invoice_to_deployment(invoice_date_str, deployments_list, tolerance_days=2):

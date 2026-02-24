@@ -45,3 +45,11 @@ The application supports multiple JSON data formats for chat exports, including 
 - **Python Libraries**: `dash`, `dash-bootstrap-components`, `plotly`, `pandas`, `numpy`.
 - **Mapping Services**: OpenStreetMap for map tiles, ArcGIS API for DC boundary polygon data.
 - **Data Storage**: Configuration and pricing data are stored in JSON files (`data/config/snow_removal.json`, `data/config/pricing.json`).
+
+### Invoice Parser
+- `data/invoice_parser.py` - Supports both Excel (.xlsx) and CSV (.csv) invoice files
+- Auto-detects file format from extension
+- Three invoice formats: simple billing, pre-treatment report, completion report
+- Auto-detects deployment type, snow tier, and date from filename/headers
+- Skips summary rows (TOTAL, SUBTOTAL, GRAND TOTAL, T&M)
+- CSV parsing converts cells to float where possible for price column detection
