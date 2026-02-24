@@ -53,23 +53,24 @@ def _detect_deployment_type(headers, title_row=None, filename=None):
     if filename:
         primary += " " + str(filename).lower()
 
-    if primary:
-        if "pre-treatment" in primary or "pretreatment" in primary or "pre treatment" in primary:
-            return "Pre-Treatment"
-        if "snow removal" in primary:
-            return "Snow Removal"
-        if "ice removal" in primary:
-            return "Ice Removal"
-        if "melt only" in primary or "melt application" in primary:
-            return "Snow Melt"
-
     all_text = " ".join([str(h).lower() for h in headers if h])
+    if "melt only" in all_text or "melt application" in all_text:
+        return "Snow Melt"
     if "pre-treatment" in all_text or "pretreatment" in all_text:
         return "Pre-Treatment"
     if "ice removal" in all_text or "ice melt" in all_text:
         return "Ice Removal"
-    if "melt only" in all_text or "melt application" in all_text:
-        return "Snow Melt"
+
+    if primary:
+        if "pre-treatment" in primary or "pretreatment" in primary or "pre treatment" in primary:
+            return "Pre-Treatment"
+        if "melt only" in primary or "melt application" in primary:
+            return "Snow Melt"
+        if "ice removal" in primary:
+            return "Ice Removal"
+        if "snow removal" in primary:
+            return "Snow Removal"
+
     if "snow removal" in all_text or "snow & ice" in all_text:
         return "Snow Removal"
     return "Snow Removal"
@@ -144,7 +145,7 @@ def _read_rows_from_csv(filepath_or_text, is_text=False):
                 converted.append(None)
             else:
                 try:
-                    converted.append(float(cell))
+                    converted.append(float(cell.replace(",", "")))
                 except ValueError:
                     converted.append(cell)
         all_rows.append(converted)
