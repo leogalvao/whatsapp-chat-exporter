@@ -11,6 +11,7 @@ Usage:
 
 import base64
 import glob
+import hashlib
 import json
 import os
 import re
@@ -6003,7 +6004,20 @@ def save_finance_config(n_clicks, labor_sw, labor_pl, machine_rate,
 def show_invoice_list_on_load(active_tab):
     if active_tab != "tab-settings":
         raise PreventUpdate
-    return _render_invoice_list(SNOW_CONFIG.get("invoices", []))
+    invoices_registry = SNOW_CONFIG.get("invoices", [])
+    migrated = False
+    for idx, existing_inv in enumerate(invoices_registry):
+        if "invoice_id" not in existing_inv:
+            existing_inv["invoice_id"] = hashlib.md5((existing_inv.get("filename", "") + str(idx)).encode()).hexdigest()[:8]
+            migrated = True
+    if migrated:
+        config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+    return _render_invoice_list(invoices_registry)
 
 
 # ── Invoice Upload Callback ──────────────────────────────────────────────────
@@ -6027,6 +6041,10 @@ def handle_invoice_upload(contents_list, filenames_list):
     config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
     invoices_registry = SNOW_CONFIG.get("invoices", [])
 
+    for idx, existing_inv in enumerate(invoices_registry):
+        if "invoice_id" not in existing_inv:
+            existing_inv["invoice_id"] = hashlib.md5((existing_inv.get("filename", "") + str(idx)).encode()).hexdigest()[:8]
+
     all_parsed = []
     errors = []
     for content, fname in zip(contents_list, filenames_list):
@@ -6035,11 +6053,13 @@ def handle_invoice_upload(contents_list, filenames_list):
             decoded = base64.b64decode(content_string)
             parsed = parse_invoice_bytes(decoded, fname)
             if parsed:
-                for inv in parsed:
+                for idx, inv in enumerate(parsed):
                     matched_dep = match_invoice_to_deployment(
                         inv.get("deployment_date"), ALL_DEPLOYMENTS_LIST, tolerance_days=3)
                     inv["matched_deployment"] = matched_dep
+                    inv_id = hashlib.md5((fname + str(idx)).encode()).hexdigest()[:8]
                     inv_record = {
+                        "invoice_id": inv_id,
                         "filename": fname,
                         "deployment_type": inv["deployment_type"],
                         "snow_tier": inv["snow_tier"],
@@ -6049,9 +6069,13 @@ def handle_invoice_upload(contents_list, filenames_list):
                         "site_count": inv["site_count"],
                         "format": inv["format"],
                         "line_items": inv["line_items"],
+                        "auto_deployment_type": inv["deployment_type"],
+                        "auto_snow_tier": inv["snow_tier"],
+                        "auto_deployment_date": inv["deployment_date"],
+                        "auto_matched_deployment": matched_dep,
                     }
                     existing = [i for i in invoices_registry
-                                if i.get("filename") == fname and i.get("deployment_date") == inv.get("deployment_date")]
+                                if i.get("invoice_id") == inv_id]
                     if existing:
                         invoices_registry.remove(existing[0])
                     invoices_registry.append(inv_record)
@@ -6104,32 +6128,262 @@ def _render_invoice_list(invoices_registry):
 
     rows = []
     for inv in invoices_registry:
-        tier_label = inv.get("snow_tier", "").replace("price_", "").replace("_", " ").title()
+        split_info = ""
+        iid = inv.get("invoice_id", "")
+        if "_split_" in iid:
+            split_info = f"Split from {iid.split('_split_')[0]}"
         rows.append({
+            "invoice_id": iid,
             "filename": inv.get("filename", ""),
             "type": inv.get("deployment_type", ""),
-            "tier": tier_label,
+            "tier": inv.get("snow_tier", ""),
             "date": inv.get("deployment_date", ""),
-            "deployment": inv.get("matched_deployment", ""),
+            "deployment": inv.get("matched_deployment", "") or "",
             "sites": inv.get("site_count", 0),
-            "total": f"${inv.get('total_billed', 0):,.2f}",
+            "total_billed": f"${inv.get('total_billed', 0):,.2f}",
+            "split": split_info,
         })
 
-    return dash_table.DataTable(
+    editable_cols = {"type", "tier", "date", "deployment", "sites", "total_billed"}
+
+    table = dash_table.DataTable(
+        id="invoice-registry-table",
         columns=[
-            {"name": "File", "id": "filename"},
-            {"name": "Type", "id": "type"},
-            {"name": "Tier", "id": "tier"},
-            {"name": "Date", "id": "date"},
-            {"name": "Deployment", "id": "deployment"},
-            {"name": "Sites", "id": "sites", "type": "numeric"},
-            {"name": "Total Billed", "id": "total"},
+            {"name": "ID", "id": "invoice_id", "editable": False},
+            {"name": "File", "id": "filename", "editable": False},
+            {"name": "Type", "id": "type", "editable": True},
+            {"name": "Tier", "id": "tier", "editable": True},
+            {"name": "Date", "id": "date", "editable": True},
+            {"name": "Deployment", "id": "deployment", "editable": True},
+            {"name": "Sites", "id": "sites", "type": "numeric", "editable": True},
+            {"name": "Total Billed", "id": "total_billed", "editable": True},
+            {"name": "Split", "id": "split", "editable": False},
         ],
         data=rows,
+        editable=True,
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
         style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px"},
-        page_size=10,
+        style_data_conditional=[
+            {"if": {"column_id": col}, "backgroundColor": "#fffde7"}
+            for col in editable_cols
+        ],
+        page_size=20,
+    )
+
+    dep_labels = [d["label"] for d in ALL_DEPLOYMENTS_LIST] if ALL_DEPLOYMENTS_LIST else []
+    dep_helper = html.P(
+        f"Available deployments: {', '.join(dep_labels)}" if dep_labels else "No deployments available.",
+        className="text-muted mt-1", style={"fontSize": "11px"}
+    )
+
+    save_section = html.Div([
+        dbc.Button("Save Edits", id="invoice-save-edits-btn", color="primary", size="sm", className="mt-2"),
+        html.Div(id="invoice-save-status", className="mt-1"),
+    ])
+
+    split_section = html.Div([
+        html.Hr(),
+        html.H6("Split Invoice Across Deployments", className="mt-3"),
+        dbc.Row([
+            dbc.Col([
+                dbc.Label("Invoice ID", size="sm"),
+                dbc.Input(id="invoice-split-id", placeholder="e.g. a1b2c3d4", size="sm"),
+            ], md=3),
+            dbc.Col([
+                dbc.Label("Deployment Labels (comma-separated)", size="sm"),
+                dbc.Input(id="invoice-split-deps", placeholder="e.g. Jan 25 Snow, Jan 26 Snow", size="sm"),
+            ], md=4),
+            dbc.Col([
+                dbc.Label("Percentages (comma-separated)", size="sm"),
+                dbc.Input(id="invoice-split-pcts", placeholder="e.g. 60, 40", size="sm"),
+            ], md=3),
+            dbc.Col([
+                dbc.Button("Split", id="invoice-split-btn", color="warning", size="sm", className="mt-4"),
+            ], md=2),
+        ], className="mb-2"),
+        html.Div(id="invoice-split-status"),
+    ])
+
+    delete_section = html.Div([
+        html.Hr(),
+        html.H6("Delete Invoice", className="mt-3"),
+        dbc.Row([
+            dbc.Col([
+                dbc.Input(id="invoice-delete-id", placeholder="Invoice ID to delete", size="sm"),
+            ], md=4),
+            dbc.Col([
+                dbc.Button("Delete", id="invoice-delete-btn", color="danger", size="sm"),
+            ], md=2),
+        ], className="mb-2"),
+        html.Div(id="invoice-delete-status"),
+    ])
+
+    return html.Div([table, dep_helper, save_section, split_section, delete_section])
+
+
+@app.callback(
+    [Output("invoice-save-status", "children"),
+     Output("invoice-list-container", "children", allow_duplicate=True)],
+    Input("invoice-save-edits-btn", "n_clicks"),
+    State("invoice-registry-table", "data"),
+    prevent_initial_call=True,
+)
+def save_invoice_edits(n_clicks, table_data):
+    global SNOW_CONFIG
+    if not n_clicks or not table_data:
+        raise PreventUpdate
+
+    invoices_registry = SNOW_CONFIG.get("invoices", [])
+    inv_map = {inv.get("invoice_id"): inv for inv in invoices_registry if inv.get("invoice_id")}
+
+    updated = 0
+    for row in table_data:
+        iid = row.get("invoice_id", "")
+        if iid not in inv_map:
+            continue
+        inv = inv_map[iid]
+        inv["deployment_type"] = row.get("type", inv.get("deployment_type", ""))
+        inv["snow_tier"] = row.get("tier", inv.get("snow_tier", ""))
+        inv["deployment_date"] = row.get("date", inv.get("deployment_date", ""))
+        inv["matched_deployment"] = row.get("deployment", inv.get("matched_deployment", ""))
+        try:
+            inv["site_count"] = int(row.get("sites", inv.get("site_count", 0)))
+        except (ValueError, TypeError):
+            pass
+        tb = row.get("total_billed", "")
+        if isinstance(tb, str):
+            tb = tb.replace("$", "").replace(",", "").strip()
+        try:
+            inv["total_billed"] = float(tb)
+        except (ValueError, TypeError):
+            pass
+        updated += 1
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return html.Span(f"Save error: {e}", style={"color": "red"}), no_update
+
+    return (
+        html.Span(f"Saved {updated} invoice(s).", style={"color": "green"}),
+        _render_invoice_list(SNOW_CONFIG.get("invoices", []))
+    )
+
+
+@app.callback(
+    [Output("invoice-split-status", "children"),
+     Output("invoice-list-container", "children", allow_duplicate=True)],
+    Input("invoice-split-btn", "n_clicks"),
+    State("invoice-split-id", "value"),
+    State("invoice-split-deps", "value"),
+    State("invoice-split-pcts", "value"),
+    prevent_initial_call=True,
+)
+def split_invoice(n_clicks, inv_id, deps_str, pcts_str):
+    global SNOW_CONFIG
+    if not n_clicks or not inv_id or not deps_str or not pcts_str:
+        raise PreventUpdate
+
+    invoices_registry = SNOW_CONFIG.get("invoices", [])
+    source = None
+    for inv in invoices_registry:
+        if inv.get("invoice_id") == inv_id.strip():
+            source = inv
+            break
+    if not source:
+        return html.Span(f"Invoice ID '{inv_id}' not found.", style={"color": "red"}), no_update
+
+    deps = [d.strip() for d in deps_str.split(",") if d.strip()]
+    try:
+        pcts = [float(p.strip()) for p in pcts_str.split(",") if p.strip()]
+    except ValueError:
+        return html.Span("Invalid percentages. Use numbers separated by commas.", style={"color": "red"}), no_update
+
+    if len(deps) != len(pcts):
+        return html.Span("Number of deployments must match number of percentages.", style={"color": "red"}), no_update
+
+    total_pct = sum(pcts)
+    if abs(total_pct - 100) > 1:
+        return html.Span(f"Percentages must sum to 100 (got {total_pct}).", style={"color": "red"}), no_update
+
+    new_records = []
+    orig_total = source.get("total_billed", 0)
+    orig_sites = source.get("site_count", 0)
+    running_total = 0.0
+    running_sites = 0
+    for i, (dep_label, pct) in enumerate(zip(deps, pcts)):
+        fraction = pct / 100.0
+        new_inv = dict(source)
+        new_inv.pop("line_items", None)
+        new_inv["invoice_id"] = f"{inv_id.strip()}_split_{i}"
+        new_inv["matched_deployment"] = dep_label
+        if i == len(deps) - 1:
+            new_inv["total_billed"] = round(orig_total - running_total, 2)
+            new_inv["site_count"] = orig_sites - running_sites
+        else:
+            split_total = round(orig_total * fraction, 2)
+            split_sites = round(orig_sites * fraction)
+            new_inv["total_billed"] = split_total
+            new_inv["site_count"] = split_sites
+            running_total += split_total
+            running_sites += split_sites
+        new_inv["line_items"] = []
+        new_records.append(new_inv)
+
+    invoices_registry.remove(source)
+    invoices_registry.extend(new_records)
+    SNOW_CONFIG["invoices"] = invoices_registry
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return html.Span(f"Save error: {e}", style={"color": "red"}), no_update
+
+    return (
+        html.Span(f"Split invoice {inv_id} into {len(new_records)} records.", style={"color": "green"}),
+        _render_invoice_list(SNOW_CONFIG.get("invoices", []))
+    )
+
+
+@app.callback(
+    [Output("invoice-delete-status", "children"),
+     Output("invoice-list-container", "children", allow_duplicate=True)],
+    Input("invoice-delete-btn", "n_clicks"),
+    State("invoice-delete-id", "value"),
+    prevent_initial_call=True,
+)
+def delete_invoice(n_clicks, inv_id):
+    global SNOW_CONFIG
+    if not n_clicks or not inv_id:
+        raise PreventUpdate
+
+    invoices_registry = SNOW_CONFIG.get("invoices", [])
+    target = None
+    for inv in invoices_registry:
+        if inv.get("invoice_id") == inv_id.strip():
+            target = inv
+            break
+    if not target:
+        return html.Span(f"Invoice ID '{inv_id}' not found.", style={"color": "red"}), no_update
+
+    invoices_registry.remove(target)
+    SNOW_CONFIG["invoices"] = invoices_registry
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return html.Span(f"Save error: {e}", style={"color": "red"}), no_update
+
+    return (
+        html.Span(f"Deleted invoice {inv_id}.", style={"color": "green"}),
+        _render_invoice_list(SNOW_CONFIG.get("invoices", []))
     )
 
 
