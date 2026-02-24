@@ -507,6 +507,13 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
 
         dep_overrides = config.get("deployment_overrides", {}).get(label, {})
         ov_route_count = dep_overrides.get("route_count")
+        if ov_route_count is None:
+            inv_max = 0
+            for inv in config.get("invoices", []):
+                if inv.get("matched_deployment") == label:
+                    inv_max = max(inv_max, inv.get("site_count", 0))
+            if inv_max > 0:
+                ov_route_count = inv_max
         if ov_route_count is not None:
             total_sites = ov_route_count
 

@@ -690,6 +690,44 @@ def _match_location_to_pricing(location, pricing_index):
     return None
 
 
+def _get_invoice_routes_for_deployment(dep_label):
+    invoices = SNOW_CONFIG.get("invoices", [])
+    routes = []
+    for inv in invoices:
+        if inv.get("matched_deployment") != dep_label:
+            continue
+        for item in inv.get("line_items", []):
+            routes.append({
+                "building_name": item.get("building_name", ""),
+                "address": item.get("address", ""),
+                "ward": str(item.get("ward", "")),
+                "service_area": item.get("service_area", ""),
+                "billed_amount": item.get("billed_amount", 0),
+                "invoice_type": inv.get("deployment_type", ""),
+                "invoice_id": inv.get("invoice_id", ""),
+            })
+    return routes
+
+
+def _get_invoice_route_count_for_deployment(dep_label):
+    invoices = SNOW_CONFIG.get("invoices", [])
+    max_sites = 0
+    for inv in invoices:
+        if inv.get("matched_deployment") == dep_label:
+            max_sites = max(max_sites, inv.get("site_count", 0))
+    return max_sites
+
+
+def _get_total_invoice_route_count():
+    invoices = SNOW_CONFIG.get("invoices", [])
+    dep_max = {}
+    for inv in invoices:
+        dep = inv.get("matched_deployment")
+        if dep:
+            dep_max[dep] = max(dep_max.get(dep, 0), inv.get("site_count", 0))
+    return sum(dep_max.values())
+
+
 def _compute_financials(df, deployments_list, snow_config, pricing_index):
     finance_cfg = snow_config.get("finance_config", {})
     labor_rate_sw = finance_cfg.get("labor_rate_sidewalk", 25.0)
@@ -766,7 +804,7 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
 
         if dep_invoices:
             dep_revenue = sum(inv.get("total_billed", 0) for inv in dep_invoices)
-            matched_sites = sum(inv.get("site_count", 0) for inv in dep_invoices)
+            matched_sites = max(inv.get("site_count", 0) for inv in dep_invoices)
             for loc in dep_locations:
                 all_serviced_locations.add(loc)
         else:
@@ -1150,7 +1188,9 @@ def _do_export_report():
     total_msgs = len(df)
     clean_msgs = len(df[df["noise_type"] == "clean"])
     active_crews = df["chat"].nunique()
-    total_sites = _count_billable_routes_from_df(df)
+    chat_sites = _count_billable_routes_from_df(df)
+    inv_total = _get_total_invoice_route_count()
+    total_sites = max(chat_sites, inv_total) if inv_total > 0 else chat_sites
     avg_sites_hr = round(sc["avg_sites_per_hour"].mean(), 2) if not sc.empty else 0
     avg_trans = round(sc["avg_transition_min"].mean(), 1) if not sc.empty else 0
     avg_first_str = "N/A"
@@ -3666,7 +3706,9 @@ def _build_deployment_summary_data(df):
         crews = grp["chat"].nunique()
         n_msgs = len(grp)
         visits_df = _build_site_visits(grp, "chat")
-        total_sites = _count_billable_routes_from_df(grp)
+        chat_sites = _count_billable_routes_from_df(grp)
+        inv_dep_count = _get_invoice_route_count_for_deployment(dep_label)
+        total_sites = max(chat_sites, inv_dep_count) if inv_dep_count > 0 else chat_sites
         ds = _build_daily_summary(grp, "chat")
         sc = _build_crew_scorecard(visits_df, ds)
         avg_sites_hr = sc["avg_sites_per_hour"].mean() if not sc.empty else 0
@@ -4274,7 +4316,9 @@ def update_kpi_cards(chats, senders, quality, msg_types, time_range,
     visits_df = _build_site_visits(df, "chat")
     ds = _build_daily_summary(df, scol)
 
-    total_sites = _count_billable_routes_from_df(df)
+    chat_sites = _count_billable_routes_from_df(df)
+    inv_total = _get_total_invoice_route_count()
+    total_sites = max(chat_sites, inv_total) if inv_total > 0 else chat_sites
     avg_sites_hr = 0.0
     avg_trans = 0.0
     if not visits_df.empty:
@@ -5297,36 +5341,6 @@ def _load_dc_boundary():
     except Exception as e:
         print(f"[map] Failed to load DC boundary: {e}")
         return None
-
-
-# ── Invoice Route Helpers ─────────────────────────────────────────────────────
-
-def _get_invoice_routes_for_deployment(dep_label):
-    invoices = SNOW_CONFIG.get("invoices", [])
-    routes = []
-    for inv in invoices:
-        if inv.get("matched_deployment") != dep_label:
-            continue
-        for item in inv.get("line_items", []):
-            routes.append({
-                "building_name": item.get("building_name", ""),
-                "address": item.get("address", ""),
-                "ward": str(item.get("ward", "")),
-                "service_area": item.get("service_area", ""),
-                "billed_amount": item.get("billed_amount", 0),
-                "invoice_type": inv.get("deployment_type", ""),
-                "invoice_id": inv.get("invoice_id", ""),
-            })
-    return routes
-
-
-def _get_invoice_route_count_for_deployment(dep_label):
-    invoices = SNOW_CONFIG.get("invoices", [])
-    total = 0
-    for inv in invoices:
-        if inv.get("matched_deployment") == dep_label:
-            total += inv.get("site_count", 0)
-    return total
 
 
 # ── Deployment Breakdown callback ─────────────────────────────────────────────
