@@ -6033,7 +6033,8 @@ def show_invoice_list_on_load(active_tab):
 @app.callback(
     [Output("invoice-upload-status", "children"),
      Output("invoice-preview-container", "children"),
-     Output("invoice-list-container", "children", allow_duplicate=True)],
+     Output("invoice-list-container", "children", allow_duplicate=True),
+     Output("upload-invoice", "contents")],
     Input("upload-invoice", "contents"),
     State("upload-invoice", "filename"),
     prevent_initial_call=True,
@@ -6057,7 +6058,7 @@ def handle_invoice_upload(contents_list, filenames_list):
     errors = []
     for content, fname in zip(contents_list, filenames_list):
         try:
-            _, content_string = content.split(",")
+            _, content_string = content.split(",", 1)
             decoded = base64.b64decode(content_string)
             parsed = parse_invoice_bytes(decoded, fname)
             if parsed:
@@ -6102,11 +6103,11 @@ def handle_invoice_upload(contents_list, filenames_list):
 
     if errors:
         status = html.Div([
-            html.Span(f"Imported {len(all_parsed)} invoice(s). ", style={"color": "green"}),
+            html.Span(f"Imported {len(all_parsed)} invoice(s) from {len(contents_list)} file(s). ", style={"color": "green"}),
             html.Span(f"Errors: {'; '.join(errors)}", style={"color": "red"}),
         ])
     else:
-        status = html.Span(f"Successfully imported {len(all_parsed)} invoice(s).", style={"color": "green"})
+        status = html.Span(f"Successfully imported {len(all_parsed)} invoice(s) from {len(contents_list)} file(s).", style={"color": "green"})
 
     preview_rows = []
     for inv in all_parsed:
@@ -6127,7 +6128,7 @@ def handle_invoice_upload(contents_list, filenames_list):
 
     inv_list = _render_invoice_list(invoices_registry)
 
-    return status, html.Div(preview_rows), inv_list
+    return status, html.Div(preview_rows), inv_list, None
 
 
 def _render_invoice_list(invoices_registry):
