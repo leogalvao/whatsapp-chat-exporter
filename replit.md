@@ -28,10 +28,10 @@ The dashboard has 9 tabs:
 1. **Overview** - Message volume, types, activity heatmap, sender participation, daily timeline
 2. **Productivity** - Daily productivity scores, crew leaderboard with rankings, first report times, reporting windows, idle time detection, daily message trends
 3. **Crew Analysis** - Per-sender metrics, message gaps, crew scorecards, sites/hour, transition times, route timelines, pace consistency, top locations
-4. **Deployments** - Deployment summary, timeline, cross-deployment comparison, performance trends, sites heatmap, downloadable HTML reports
+4. **Deployments** - Deployment summary, timeline, cross-deployment comparison, performance trends, sites heatmap, downloadable HTML reports, deployment breakdown with crew-location reassignment
 5. **Operations** - Routing Gantt chart, deployment burn-down (actual vs 12hr expected pace), location type performance, traffic analysis, delay report, recall summary
 6. **Finances** - Revenue forecasting, cost analysis, profit metrics from contract pricing cross-referenced with operational data
-7. **Map** - DC Service Map with OpenStreetMap tiles, DC boundary polygon from ArcGIS API, location dots color-coded by crew, marker size by visit frequency
+7. **Map** - DC Service Map with OpenStreetMap tiles, DC boundary polygon from ArcGIS API, location dots color-coded by crew, marker size by visit frequency, deployment filter
 8. **Data Quality** - Noise filtering overview, raw message data table
 9. **Settings** - Crew location type assignment (Sidewalk/Parking Lot), non-trackable sender management, expected deployment hours, service time configuration, location registry upload
 
@@ -55,6 +55,13 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-24: Deployment breakdown with crew-location reassignment and map deployment filter
+  - Deployment Breakdown section on Deployments tab: select a deployment to see all serviced locations
+  - Auto-detected crew assignments shown alongside editable dropdown overrides (Sidewalk/Parking Lot crews)
+  - Crew reassignment persists to snow_removal.json via Save button
+  - Map tab: deployment filter dropdown filters displayed locations to those active in selected deployment
+  - Map title updates to show deployment name and site count when filtered
+  - Visit counts recalculated per deployment for marker sizing
 - 2026-02-24: Finances tab with contract pricing cross-reference
   - Imported 695-site contract pricing from Excel proposal (4 snow depth tiers)
   - Pricing stored in data/config/pricing.json, matched to serviced locations by normalized address/name

@@ -1282,6 +1282,27 @@ main_content = dbc.Tabs(
                 dbc.Col(dcc.Graph(id="chart-deployment-crew-comparison"), md=6),
                 dbc.Col(dcc.Graph(id="chart-deployment-sites-heatmap"), md=6),
             ]),
+            html.Hr(className="my-3"),
+            html.H5("Deployment Breakdown", className="mb-2"),
+            html.P("Select a deployment to see which locations were serviced and by which crew. Reassign crews using the dropdowns.",
+                   className="text-muted mb-2", style={"fontSize": "13px"}),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Deployment", className="mb-1"),
+                    dcc.Dropdown(
+                        id="dep-breakdown-select",
+                        options=[{"label": d, "value": d} for d in ALL_DEPLOYMENTS],
+                        value=ALL_DEPLOYMENTS[-1] if ALL_DEPLOYMENTS else None,
+                        clearable=False,
+                    ),
+                ], md=4),
+                dbc.Col([
+                    dbc.Button("Save Crew Assignments", id="dep-save-crews-btn", 
+                               color="success", size="sm", className="mt-4", n_clicks=0),
+                    html.Span(id="dep-save-crews-status", className="ms-2 align-middle"),
+                ], md=4),
+            ], className="mb-3"),
+            html.Div(id="dep-breakdown-table-container"),
         ]),
         dbc.Tab(label="Operations", tab_id="tab-operations", children=[
             html.Div([
@@ -1309,9 +1330,21 @@ main_content = dbc.Tabs(
         dbc.Tab(label="Map", tab_id="tab-map", children=[
             html.Div([
                 html.H4("DC Service Map", className="mb-1"),
-                html.P("Geographic view of service locations across the DC area. Dot size reflects visit frequency.",
+                html.P("Geographic view of service locations. Filter by deployment to see which sites were active.",
                        className="text-muted mb-3", style={"fontSize": "14px"}),
             ], className="mt-3 mb-2 px-1"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Filter by Deployment", className="mb-1"),
+                    dcc.Dropdown(
+                        id="map-deployment-filter",
+                        options=[{"label": "All Deployments", "value": "ALL"}] + 
+                                [{"label": d, "value": d} for d in ALL_DEPLOYMENTS],
+                        value="ALL",
+                        clearable=False,
+                    ),
+                ], md=4),
+            ], className="mb-2"),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="chart-service-map", style={"height": "700px"}), md=12),
             ]),
@@ -4783,14 +4816,191 @@ def _load_dc_boundary():
         return None
 
 
+# ── Deployment Breakdown callback ─────────────────────────────────────────────
+
+@app.callback(
+    Output("dep-breakdown-table-container", "children"),
+    Input("dep-breakdown-select", "value"),
+)
+def update_deployment_breakdown(selected_dep):
+    if not selected_dep:
+        raise PreventUpdate
+    try:
+        dep_df = DF_ALL[(DF_ALL["deployment"] == selected_dep) & (DF_ALL["noise_type"] == "clean")]
+        non_trackable = set(SNOW_CONFIG.get("non_trackable_senders", []))
+        if non_trackable:
+            dep_df = dep_df[~dep_df["sender_resolved"].isin(non_trackable)]
+
+        if dep_df.empty:
+            return html.P("No data for this deployment.", className="text-muted")
+
+        locations = dep_df[dep_df["location"].str.len() > 0]["location"].unique()
+        
+        all_crews = sorted(set(
+            crew for chat in dep_df["chat"].unique()
+            for crew, _, _ in [_extract_crew_from_chat(chat)]
+            if crew
+        ))
+
+        registry = SNOW_CONFIG.get("location_registry", [])
+        registry_map = {}
+        for r in registry:
+            raw = r.get("_matched_raw", "")
+            if raw:
+                registry_map[_normalize_location(raw)] = r
+
+        rows = []
+        for loc in sorted(locations):
+            loc_msgs = dep_df[dep_df["location"] == loc]
+            crews_in_loc = loc_msgs["chat"].unique()
+            detected_crews = []
+            detected_type = "Unknown"
+            for ch in crews_in_loc:
+                crew, is_sw, is_pl = _extract_crew_from_chat(ch)
+                if crew:
+                    detected_crews.append(crew)
+                    if is_pl:
+                        detected_type = "Parking Lot"
+                    elif is_sw:
+                        detected_type = "Sidewalk"
+
+            reg = registry_map.get(_normalize_location(loc), {})
+            assigned_sw = reg.get("crew_sidewalk", "")
+            assigned_pl = reg.get("crew_parking_lot", "")
+
+            visits = len(loc_msgs)
+            senders = loc_msgs["sender_resolved"].nunique()
+
+            rows.append({
+                "location": loc,
+                "type": detected_type,
+                "visits": visits,
+                "senders": senders,
+                "detected_crew": ", ".join(detected_crews) if detected_crews else "Unknown",
+                "crew_sidewalk": assigned_sw,
+                "crew_parking_lot": assigned_pl,
+            })
+
+        if not rows:
+            return html.P("No locations found for this deployment.", className="text-muted")
+
+        all_crew_options = sorted(set(
+            crew for chat in ALL_CHATS
+            for crew, _, _ in [_extract_crew_from_chat(chat)]
+            if crew
+        ))
+
+        table = dash_table.DataTable(
+            id="dep-breakdown-table",
+            columns=[
+                {"name": "Location", "id": "location", "editable": False},
+                {"name": "Type", "id": "type", "editable": False},
+                {"name": "Visits", "id": "visits", "type": "numeric", "editable": False},
+                {"name": "Reporters", "id": "senders", "type": "numeric", "editable": False},
+                {"name": "Detected Crew", "id": "detected_crew", "editable": False},
+                {"name": "Assigned SW Crew", "id": "crew_sidewalk",
+                 "editable": True, "presentation": "dropdown"},
+                {"name": "Assigned PL Crew", "id": "crew_parking_lot",
+                 "editable": True, "presentation": "dropdown"},
+            ],
+            data=rows,
+            dropdown={
+                "crew_sidewalk": {
+                    "options": [{"label": "", "value": ""}] + 
+                               [{"label": c, "value": c} for c in all_crew_options],
+                },
+                "crew_parking_lot": {
+                    "options": [{"label": "", "value": ""}] + 
+                               [{"label": c, "value": c} for c in all_crew_options],
+                },
+            },
+            style_table={"overflowX": "auto"},
+            style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px",
+                        "minWidth": "80px", "maxWidth": "250px", "overflow": "hidden",
+                        "textOverflow": "ellipsis"},
+            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px"},
+            style_data_conditional=[
+                {"if": {"column_id": "crew_sidewalk"}, "backgroundColor": "#f0fff0"},
+                {"if": {"column_id": "crew_parking_lot"}, "backgroundColor": "#fff0f0"},
+            ],
+            page_size=30,
+            sort_action="native",
+            filter_action="native",
+        )
+
+        summary = html.Div([
+            html.P([
+                html.Strong(f"{len(rows)} locations"),
+                f" serviced by ",
+                html.Strong(f"{len(all_crews)} crews"),
+                f" | {sum(r['visits'] for r in rows)} total visits",
+            ], className="mb-2", style={"fontSize": "13px"}),
+        ])
+
+        return html.Div([summary, table])
+
+    except Exception as e:
+        print(f"[Deployment Breakdown] Error: {e}")
+        import traceback; traceback.print_exc()
+        return html.P("Error loading deployment breakdown.", className="text-muted")
+
+
+@app.callback(
+    Output("dep-save-crews-status", "children"),
+    Input("dep-save-crews-btn", "n_clicks"),
+    State("dep-breakdown-table", "data"),
+    prevent_initial_call=True,
+)
+def save_deployment_crew_assignments(n_clicks, table_data):
+    global SNOW_CONFIG
+    if not n_clicks or not table_data:
+        raise PreventUpdate
+    try:
+        registry = SNOW_CONFIG.get("location_registry", [])
+        registry_by_norm = {}
+        for r in registry:
+            raw = r.get("_matched_raw", "")
+            if raw:
+                registry_by_norm[_normalize_location(raw)] = r
+            mcl = r.get("matched_chat_location", "")
+            if mcl and "(" in mcl:
+                mcl_raw = mcl.split("(")[0].strip()
+                if mcl_raw:
+                    registry_by_norm.setdefault(_normalize_location(mcl_raw), r)
+            loc_name = r.get("location_name", "")
+            if loc_name:
+                registry_by_norm.setdefault(_normalize_location(loc_name), r)
+
+        updated = 0
+        for row in table_data:
+            loc = row.get("location", "")
+            norm = _normalize_location(loc)
+            if norm in registry_by_norm:
+                entry = registry_by_norm[norm]
+                new_sw = row.get("crew_sidewalk", "")
+                new_pl = row.get("crew_parking_lot", "")
+                if entry.get("crew_sidewalk", "") != new_sw or entry.get("crew_parking_lot", "") != new_pl:
+                    entry["crew_sidewalk"] = new_sw
+                    entry["crew_parking_lot"] = new_pl
+                    updated += 1
+
+        config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+        return html.Span(f"Saved! {updated} assignments updated.", style={"color": "green"})
+    except Exception as e:
+        return html.Span(f"Error: {e}", style={"color": "red"})
+
+
 # ── Map callback ──────────────────────────────────────────────────────────────
 
 @app.callback(
     Output("chart-service-map", "figure"),
     Input("main-tabs", "active_tab"),
+    Input("map-deployment-filter", "value"),
     prevent_initial_call=True,
 )
-def render_service_map(active_tab):
+def render_service_map(active_tab, dep_filter):
     if active_tab != "tab-map":
         raise PreventUpdate
     try:
@@ -4817,16 +5027,45 @@ def render_service_map(active_tab):
                     ))
 
         registry = SNOW_CONFIG.get("location_registry", [])
-        loc_counts = {}
-        if not DF_ALL.empty:
-            counts = DF_ALL[DF_ALL["location"].str.len() > 0]["location"].value_counts()
-            loc_counts = counts.to_dict()
+
+        if dep_filter and dep_filter != "ALL":
+            dep_df = DF_ALL[(DF_ALL["deployment"] == dep_filter) & (DF_ALL["noise_type"] == "clean")]
+            non_trackable = set(SNOW_CONFIG.get("non_trackable_senders", []))
+            if non_trackable:
+                dep_df = dep_df[~dep_df["sender_resolved"].isin(non_trackable)]
+            active_locations = set(dep_df[dep_df["location"].str.len() > 0]["location"].unique())
+            loc_counts = dep_df[dep_df["location"].str.len() > 0]["location"].value_counts().to_dict()
+        else:
+            active_locations = None
+            loc_counts = {}
+            if not DF_ALL.empty:
+                counts = DF_ALL[DF_ALL["location"].str.len() > 0]["location"].value_counts()
+                loc_counts = counts.to_dict()
 
         locs_with_coords = [
             r for r in registry
             if r.get("lat") and r.get("lon")
             and r["lat"] != "" and r["lon"] != ""
         ]
+
+        if active_locations is not None:
+            filtered_locs = []
+            for r in locs_with_coords:
+                m = r.get("_matched_raw", "")
+                if not m:
+                    mc = r.get("matched_chat_location", "")
+                    if mc and "(" in mc:
+                        m = mc.split("(")[0].strip()
+                norm_m = _normalize_location(m) if m else ""
+                if norm_m and any(_normalize_location(al) == norm_m for al in active_locations):
+                    filtered_locs.append(r)
+                elif not norm_m:
+                    loc_name_norm = _normalize_location(r.get("location_name", ""))
+                    for al in active_locations:
+                        if _normalize_location(al) == loc_name_norm:
+                            filtered_locs.append(r)
+                            break
+            locs_with_coords = filtered_locs
 
         if locs_with_coords:
             BOLD_COLORS = [
@@ -4904,6 +5143,12 @@ def render_service_map(active_tab):
                     showlegend=True,
                 ))
 
+        title = "DC Service Map"
+        if dep_filter and dep_filter != "ALL":
+            title += f" — {dep_filter}"
+            n_locs = len(locs_with_coords) if locs_with_coords else 0
+            title += f" ({n_locs} sites)"
+
         fig.update_layout(
             map=dict(
                 style="open-street-map",
@@ -4912,7 +5157,7 @@ def render_service_map(active_tab):
             ),
             margin=dict(l=0, r=0, t=30, b=0),
             height=700,
-            title="DC Service Map",
+            title=title,
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
         )
         return fig
