@@ -31,13 +31,16 @@ Key dashboard features include:
 - Detection of idle time and recall events.
 - Automatic location type inference and trackable sender filtering.
 - Deployment burn-down charts scaled by crew size.
-- Per-deployment overrides for crew sizes (SW/PL workers) and route counts, saved to config.
+- Per-deployment overrides for crew sizes (SW/PL workers) and total route count (single field matching invoice format), saved to config.
 - Map marker clustering (per-crew, auto-clusters at lower zoom levels).
 - Crew merging capabilities for consistent tracking.
 - Drag-and-drop file upload for various data formats.
 - Distance-based travel efficiency analysis.
 - Location registry with fuzzy matching and map integration.
-- Invoice reconciliation with SW/PL split validation.
+- Invoice reconciliation with cross-referencing.
+- Full invoice management: batch import, editable fields (type, tier, date, deployment, sites, total), split across deployments, delete.
+- Stable invoice IDs with auto-detected field preservation (auto_* fields alongside editable overrides).
+- Invoice routes are unified (no SW/PL distinction on invoices; split only applies to costs/expenses).
 
 ### Supported Data Formats
 The application supports multiple JSON data formats for chat exports, including unified multi-chat exports, legacy per-chat exports, pre-computed metrics (`metrics_report.json`), and automatically skips OCR dispatch data (`_dispatches.json`). It also includes robust handling for a new `v2 CrewChatData` format, supporting message-level deduplication and detailed message attributes.
