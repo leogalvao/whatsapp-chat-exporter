@@ -570,6 +570,9 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         }
 
     df_clean = df[df["noise_type"] == "clean"].copy()
+    non_trackable = set(snow_config.get("non_trackable_senders", []))
+    if non_trackable:
+        df_clean = df_clean[~df_clean["sender_resolved"].isin(non_trackable)]
 
     dep_financials = []
     crew_data = {}
