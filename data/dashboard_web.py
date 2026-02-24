@@ -814,12 +814,16 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
                         sw_sites += 1
 
         dep_overrides = snow_config.get("deployment_overrides", {}).get(label, {})
-        ov_sw = dep_overrides.get("sw_routes")
-        ov_pl = dep_overrides.get("pl_routes")
-        if ov_sw is not None:
-            sw_sites = ov_sw
-        if ov_pl is not None:
-            pl_sites = ov_pl
+        ov_route_count = dep_overrides.get("route_count")
+        if ov_route_count is not None:
+            auto_total = sw_sites + pl_sites
+            if auto_total > 0:
+                sw_ratio = sw_sites / auto_total
+                sw_sites = round(ov_route_count * sw_ratio)
+                pl_sites = ov_route_count - sw_sites
+            else:
+                sw_sites = ov_route_count
+                pl_sites = 0
         billable_site_count = sw_sites + pl_sites
         dep_salt_lbs = (sw_sites * salt_lbs_sw) + (pl_sites * salt_lbs_pl)
         dep_salt = dep_salt_lbs * salt_cost_lb
@@ -5507,15 +5511,23 @@ def render_deployment_overrides(active_tab, _trigger):
 
         crews_active = dep_df["chat"].nunique() if not dep_df.empty else 0
 
+        auto_total = auto_sw + auto_pl
+
+        inv_routes = ""
+        invoices_list = SNOW_CONFIG.get("invoices", [])
+        for inv in invoices_list:
+            if inv.get("matched_deployment") == label:
+                inv_routes = inv.get("site_count", "")
+                break
+
         rows_data.append({
             "deployment": label,
             "crews_detected": crews_active,
             "workers_sw": dep_ov.get("workers_sw", ""),
             "workers_pl": dep_ov.get("workers_pl", ""),
-            "auto_sw_routes": auto_sw,
-            "sw_routes": dep_ov.get("sw_routes", ""),
-            "auto_pl_routes": auto_pl,
-            "pl_routes": dep_ov.get("pl_routes", ""),
+            "auto_routes": auto_total,
+            "invoice_routes": inv_routes,
+            "route_count": dep_ov.get("route_count", ""),
         })
 
     return dash_table.DataTable(
@@ -5525,10 +5537,9 @@ def render_deployment_overrides(active_tab, _trigger):
             {"name": "Crews Detected", "id": "crews_detected"},
             {"name": "SW Workers", "id": "workers_sw", "type": "numeric", "editable": True},
             {"name": "PL Workers", "id": "workers_pl", "type": "numeric", "editable": True},
-            {"name": "Auto SW Routes", "id": "auto_sw_routes"},
-            {"name": "SW Routes Override", "id": "sw_routes", "type": "numeric", "editable": True},
-            {"name": "Auto PL Routes", "id": "auto_pl_routes"},
-            {"name": "PL Routes Override", "id": "pl_routes", "type": "numeric", "editable": True},
+            {"name": "Chat Routes", "id": "auto_routes"},
+            {"name": "Invoice Routes", "id": "invoice_routes"},
+            {"name": "Routes Override", "id": "route_count", "type": "numeric", "editable": True},
         ],
         data=rows_data,
         editable=True,
@@ -5560,7 +5571,7 @@ def save_deployment_overrides(n_clicks, table_data):
         if not dep:
             continue
         ov = {}
-        for key in ["workers_sw", "workers_pl", "sw_routes", "pl_routes"]:
+        for key in ["workers_sw", "workers_pl", "route_count"]:
             val = row.get(key)
             if val is not None and val != "":
                 try:
