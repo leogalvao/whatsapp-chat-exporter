@@ -816,6 +816,10 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
 
         dep_overrides = snow_config.get("deployment_overrides", {}).get(label, {})
         ov_route_count = dep_overrides.get("route_count")
+        if ov_route_count is None:
+            inv_count = _get_invoice_route_count_for_deployment(label)
+            if inv_count > 0:
+                ov_route_count = inv_count
         if ov_route_count is not None:
             auto_total = sw_sites + pl_sites
             if auto_total > 0:
@@ -5295,6 +5299,36 @@ def _load_dc_boundary():
         return None
 
 
+# ── Invoice Route Helpers ─────────────────────────────────────────────────────
+
+def _get_invoice_routes_for_deployment(dep_label):
+    invoices = SNOW_CONFIG.get("invoices", [])
+    routes = []
+    for inv in invoices:
+        if inv.get("matched_deployment") != dep_label:
+            continue
+        for item in inv.get("line_items", []):
+            routes.append({
+                "building_name": item.get("building_name", ""),
+                "address": item.get("address", ""),
+                "ward": str(item.get("ward", "")),
+                "service_area": item.get("service_area", ""),
+                "billed_amount": item.get("billed_amount", 0),
+                "invoice_type": inv.get("deployment_type", ""),
+                "invoice_id": inv.get("invoice_id", ""),
+            })
+    return routes
+
+
+def _get_invoice_route_count_for_deployment(dep_label):
+    invoices = SNOW_CONFIG.get("invoices", [])
+    total = 0
+    for inv in invoices:
+        if inv.get("matched_deployment") == dep_label:
+            total += inv.get("site_count", 0)
+    return total
+
+
 # ── Deployment Breakdown callback ─────────────────────────────────────────────
 
 @app.callback(
@@ -5310,16 +5344,14 @@ def update_deployment_breakdown(selected_dep):
         if non_trackable:
             dep_df = dep_df[~dep_df["sender_resolved"].isin(non_trackable)]
 
-        if dep_df.empty:
-            return html.P("No data for this deployment.", className="text-muted")
-
-        locations = dep_df[dep_df["location"].str.len() > 0]["location"].unique()
+        has_chat_data = not dep_df.empty
+        locations = dep_df[dep_df["location"].str.len() > 0]["location"].unique() if has_chat_data else []
         
         all_crews = sorted(set(
             crew for chat in dep_df["chat"].unique()
             for crew, _, _ in [_extract_crew_from_chat(chat)]
             if crew
-        ))
+        )) if has_chat_data else []
 
         registry = SNOW_CONFIG.get("location_registry", [])
         registry_map = {}
@@ -5329,6 +5361,7 @@ def update_deployment_breakdown(selected_dep):
                 registry_map[_normalize_location(raw)] = r
 
         rows = []
+        chat_loc_set = set()
         for loc in sorted(locations):
             loc_msgs = dep_df[dep_df["location"] == loc]
             crews_in_loc = loc_msgs["chat"].unique()
@@ -5349,15 +5382,41 @@ def update_deployment_breakdown(selected_dep):
 
             visits = len(loc_msgs)
             senders = loc_msgs["sender_resolved"].nunique()
+            chat_loc_set.add(_normalize_location(loc))
 
             rows.append({
                 "location": loc,
+                "source": "Chat",
                 "type": detected_type,
+                "service_area": "",
                 "visits": visits,
                 "senders": senders,
+                "billed": "",
                 "detected_crew": ", ".join(detected_crews) if detected_crews else "Unknown",
                 "crew_sidewalk": assigned_sw,
                 "crew_parking_lot": assigned_pl,
+            })
+
+        inv_routes = _get_invoice_routes_for_deployment(selected_dep)
+        inv_only_count = 0
+        for ir in inv_routes:
+            addr_norm = _normalize_location(ir["address"]) if ir["address"] else ""
+            bname_norm = _normalize_location(ir["building_name"]) if ir["building_name"] else ""
+            matched_chat = addr_norm in chat_loc_set or bname_norm in chat_loc_set
+            source = "Both" if matched_chat else "Invoice"
+            if not matched_chat:
+                inv_only_count += 1
+            rows.append({
+                "location": ir["building_name"],
+                "source": source,
+                "type": ir["invoice_type"],
+                "service_area": ir["service_area"],
+                "visits": 0,
+                "senders": 0,
+                "billed": f"${ir['billed_amount']:,.2f}" if ir["billed_amount"] else "",
+                "detected_crew": "",
+                "crew_sidewalk": "",
+                "crew_parking_lot": "",
             })
 
         if not rows:
@@ -5373,9 +5432,12 @@ def update_deployment_breakdown(selected_dep):
             id="dep-breakdown-table",
             columns=[
                 {"name": "Location", "id": "location", "editable": False},
+                {"name": "Source", "id": "source", "editable": False},
                 {"name": "Type", "id": "type", "editable": False},
+                {"name": "Service Area", "id": "service_area", "editable": False},
                 {"name": "Visits", "id": "visits", "type": "numeric", "editable": False},
                 {"name": "Reporters", "id": "senders", "type": "numeric", "editable": False},
+                {"name": "Billed", "id": "billed", "editable": False},
                 {"name": "Detected Crew", "id": "detected_crew", "editable": False},
                 {"name": "Assigned SW Crew", "id": "crew_sidewalk",
                  "editable": True, "presentation": "dropdown"},
@@ -5401,19 +5463,33 @@ def update_deployment_breakdown(selected_dep):
             style_data_conditional=[
                 {"if": {"column_id": "crew_sidewalk"}, "backgroundColor": "#f0fff0"},
                 {"if": {"column_id": "crew_parking_lot"}, "backgroundColor": "#fff0f0"},
+                {"if": {"filter_query": "{source} = 'Invoice'"}, "backgroundColor": "#e3f2fd"},
+                {"if": {"filter_query": "{source} = 'Both'"}, "backgroundColor": "#e8f5e9"},
             ],
             page_size=30,
             sort_action="native",
             filter_action="native",
         )
 
+        chat_count = sum(1 for r in rows if r["source"] == "Chat")
+        both_count = sum(1 for r in rows if r["source"] == "Both")
+        inv_billed = sum(ir["billed_amount"] for ir in inv_routes)
+        parts = [
+            html.Strong(f"{chat_count} chat locations"),
+            f" serviced by ",
+            html.Strong(f"{len(all_crews)} crews"),
+            f" | {sum(r['visits'] for r in rows)} total visits",
+        ]
+        if inv_routes:
+            parts.append(f" | {len(inv_routes)} invoice routes")
+            if both_count:
+                parts.append(f" ({both_count} matched)")
+            if inv_only_count:
+                parts.append(f" ({inv_only_count} invoice-only)")
+            parts.append(f" | Total billed: ${inv_billed:,.2f}")
+
         summary = html.Div([
-            html.P([
-                html.Strong(f"{len(rows)} locations"),
-                f" serviced by ",
-                html.Strong(f"{len(all_crews)} crews"),
-                f" | {sum(r['visits'] for r in rows)} total visits",
-            ], className="mb-2", style={"fontSize": "13px"}),
+            html.P(parts, className="mb-2", style={"fontSize": "13px"}),
         ])
 
         return html.Div([summary, table])

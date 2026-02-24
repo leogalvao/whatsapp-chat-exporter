@@ -38,9 +38,11 @@ Key dashboard features include:
 - Distance-based travel efficiency analysis.
 - Location registry with fuzzy matching and map integration.
 - Invoice reconciliation with cross-referencing.
-- Full invoice management: batch import, editable fields (type, tier, date, deployment, sites, total), split across deployments, delete.
+- Full invoice management: batch import, editable fields (type, tier, date, deployment, sites, total), split across deployments, multi-select delete, delete all.
 - Stable invoice IDs with auto-detected field preservation (auto_* fields alongside editable overrides).
 - Invoice routes are unified (no SW/PL distinction on invoices; split only applies to costs/expenses).
+- Invoice-based route creation: invoice line items become routes in the deployment breakdown (Source: Chat/Invoice/Both), with auto-matching between chat locations and invoice addresses.
+- Auto-route count from invoices: when no manual override is set, invoice site_count is used as the route count for finance calculations.
 
 ### Supported Data Formats
 The application supports multiple JSON data formats for chat exports, including unified multi-chat exports, legacy per-chat exports, pre-computed metrics (`metrics_report.json`), and automatically skips OCR dispatch data (`_dispatches.json`). It also includes robust handling for a new `v2 CrewChatData` format, supporting message-level deduplication and detailed message attributes.
