@@ -6046,6 +6046,9 @@ def handle_invoice_upload(contents_list, filenames_list):
     if isinstance(contents_list, str):
         contents_list = [contents_list]
         filenames_list = [filenames_list]
+    if isinstance(filenames_list, str):
+        filenames_list = [filenames_list]
+    print(f"[INVOICE UPLOAD] Received {len(contents_list)} file(s): {filenames_list}")
 
     config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
     invoices_registry = SNOW_CONFIG.get("invoices", [])
