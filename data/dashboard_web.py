@@ -27,6 +27,12 @@ from dash import ALL, Dash, Input, Output, State, callback_context, dash_table, 
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
+from invoice_parser import (
+    parse_invoice_bytes,
+    match_invoice_to_deployment,
+    reconcile_invoice_with_chat,
+)
+
 from domain_model import (
     load_config, build_job_logs, build_crew_summary, build_route_segments,
     build_deployment_burndown, build_location_type_stats, build_traffic_analysis,
@@ -730,11 +736,25 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         else:
             chat_crew_type[chat] = "Sidewalk"
 
+    invoices_list = snow_config.get("invoices", [])
+    invoice_by_dep = {}
+    for inv in invoices_list:
+        dep = inv.get("matched_deployment")
+        if dep:
+            if dep not in invoice_by_dep:
+                invoice_by_dep[dep] = []
+            invoice_by_dep[dep].append(inv)
+
     for dep in deployments_list:
         label = dep["label"]
         start = pd.Timestamp(dep["start_date"])
         end = pd.Timestamp(dep["end_date"])
-        tier = deployment_tiers.get(label, default_tier)
+
+        dep_invoices = invoice_by_dep.get(label, [])
+        if dep_invoices:
+            tier = dep_invoices[0].get("snow_tier", default_tier)
+        else:
+            tier = deployment_tiers.get(label, default_tier)
 
         dep_df = df_clean[(df_clean["msg_date"] >= start) & (df_clean["msg_date"] <= end + pd.Timedelta(days=1))]
         if dep_df.empty:
@@ -742,15 +762,21 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
 
         dep_locations = dep_df[dep_df["location"].str.len() > 0]["location"].unique()
 
-        dep_revenue = 0
-        matched_sites = 0
-        for loc in dep_locations:
-            pricing = _match_location_to_pricing(loc, pricing_index)
-            if pricing:
-                price = pricing.get(tier, pricing.get("price_under_6in", 0))
-                dep_revenue += price
-                matched_sites += 1
+        if dep_invoices:
+            dep_revenue = sum(inv.get("total_billed", 0) for inv in dep_invoices)
+            matched_sites = sum(inv.get("site_count", 0) for inv in dep_invoices)
+            for loc in dep_locations:
                 all_serviced_locations.add(loc)
+        else:
+            dep_revenue = 0
+            matched_sites = 0
+            for loc in dep_locations:
+                pricing = _match_location_to_pricing(loc, pricing_index)
+                if pricing:
+                    price = pricing.get(tier, pricing.get("price_under_6in", 0))
+                    dep_revenue += price
+                    matched_sites += 1
+                    all_serviced_locations.add(loc)
 
         dep_crews = dep_df[dep_df["sender_resolved"] != ""]["sender_resolved"].unique()
         n_crews = len(dep_crews)
@@ -775,6 +801,8 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         dep_salt_lbs = (sw_sites * salt_lbs_sw) + (pl_sites * salt_lbs_pl)
         dep_salt = dep_salt_lbs * salt_cost_lb
 
+        labor_overrides = snow_config.get("labor_overrides", {}).get(label, {})
+
         for crew in dep_crews:
             crew_msgs = dep_df[dep_df["sender_resolved"] == crew]
             if len(crew_msgs) < 2:
@@ -792,13 +820,23 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
                     crew_type = "Parking Lot"
                     break
 
+            crew_chat_name = crew_chats[0] if len(crew_chats) > 0 else ""
+            override = labor_overrides.get(crew_chat_name, {})
+            ov_rate = override.get("labor_rate")
+            ov_workers = override.get("workers")
+            ov_hours = override.get("hours")
+
+            actual_hrs = ov_hours if ov_hours else hrs
+
             if crew_type == "Parking Lot":
-                w = min(workers_pl, 2)
-                crew_labor = hrs * labor_rate_pl * w
-                crew_machine = hrs * machine_rate
+                w = ov_workers if ov_workers else min(workers_pl, 2)
+                rate = ov_rate if ov_rate else labor_rate_pl
+                crew_labor = actual_hrs * rate * w
+                crew_machine = actual_hrs * machine_rate
             else:
-                w = workers_sw
-                crew_labor = hrs * labor_rate_sw * w
+                w = ov_workers if ov_workers else workers_sw
+                rate = ov_rate if ov_rate else labor_rate_sw
+                crew_labor = actual_hrs * rate * w
                 crew_machine = 0
 
             dep_labor += crew_labor
@@ -808,7 +846,7 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
                 crew_data[crew] = {"hours": 0, "sites": 0, "revenue": 0, "deployments": 0,
                                    "labor_cost": 0, "machine_cost": 0, "salt_cost": 0,
                                    "crew_type": crew_type, "workers": w}
-            crew_data[crew]["hours"] += hrs
+            crew_data[crew]["hours"] += actual_hrs
             crew_data[crew]["deployments"] += 1
             crew_data[crew]["labor_cost"] += crew_labor
             crew_data[crew]["machine_cost"] += crew_machine
@@ -825,9 +863,14 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         dep_profit = dep_revenue - dep_total_cost
         dep_margin = (dep_profit / dep_revenue * 100) if dep_revenue > 0 else 0
 
+        rev_source = "Invoice" if dep_invoices else "Estimated"
+        dep_type = dep_invoices[0].get("deployment_type", "Snow Removal") if dep_invoices else "Snow Removal"
+
         dep_financials.append({
             "deployment": label,
+            "type": dep_type,
             "snow_tier": tier.replace("price_", "").replace("_", " ").title(),
+            "source": rev_source,
             "sites_serviced": matched_sites,
             "total_sites": len(dep_locations),
             "crews": n_crews,
@@ -1620,6 +1663,44 @@ main_content = dbc.Tabs(
             html.Hr(className="my-3"),
             html.H5("Revenue vs Costs by Deployment", className="mb-2"),
             dcc.Graph(id="fin-chart-revenue"),
+            html.Hr(className="my-3"),
+            html.H5("Per-Deployment Labor Costs", className="mb-2"),
+            html.P("Enter actual labor costs per crew per deployment. Leave blank to use default rates above.",
+                   className="text-muted mb-2", style={"fontSize": "13px"}),
+            html.Div(id="fin-labor-overrides-container"),
+            dbc.Button("Save Labor Overrides", id="fin-save-labor-overrides", color="success",
+                       size="sm", className="mt-2 mb-3", n_clicks=0),
+            html.Span(id="fin-labor-overrides-status", className="ms-2"),
+            html.Hr(className="my-3"),
+            html.H5("Invoice Reconciliation", className="mb-2"),
+            html.P("Compare invoiced sites against chat data to identify discrepancies.",
+                   className="text-muted mb-2", style={"fontSize": "13px"}),
+            dbc.Row([
+                dbc.Col([
+                    dcc.Dropdown(id="fin-recon-deployment", placeholder="Select deployment to reconcile...",
+                                 style={"fontSize": "13px"}),
+                ], md=4),
+                dbc.Col([
+                    dbc.Button("Reconcile", id="fin-recon-btn", color="primary",
+                               size="sm", className="mt-0", n_clicks=0),
+                ], md=2),
+            ], className="mb-2"),
+            html.Div(id="fin-recon-container"),
+            html.Hr(className="my-3"),
+            html.H5("Completion Verification", className="mb-2"),
+            html.P("Cross-reference portal completion reports with chat data to validate crew claims.",
+                   className="text-muted mb-2", style={"fontSize": "13px"}),
+            dbc.Row([
+                dbc.Col([
+                    dcc.Dropdown(id="fin-verify-deployment", placeholder="Select deployment to verify...",
+                                 style={"fontSize": "13px"}),
+                ], md=4),
+                dbc.Col([
+                    dbc.Button("Verify", id="fin-verify-btn", color="info",
+                               size="sm", className="mt-0", n_clicks=0),
+                ], md=2),
+            ], className="mb-2"),
+            html.Div(id="fin-verify-container"),
         ]),
         dbc.Tab(label="Data Quality", tab_id="tab-quality", children=[
             html.Div([
@@ -1720,6 +1801,32 @@ main_content = dbc.Tabs(
                     ], className="mb-2"),
                     html.Div(id="merge-status", className="mb-2"),
                     html.Div(id="merge-list-container"),
+                ], md=12),
+            ]),
+            html.Hr(className="my-3"),
+            dbc.Row([
+                dbc.Col([
+                    html.H5("Invoice Import", className="mb-2"),
+                    html.P("Upload deployment invoice Excel files (.xlsx). Each invoice is matched to a deployment by date. "
+                           "Supports snow removal, ice removal, and pre-treatment formats.",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    dcc.Upload(
+                        id="upload-invoice",
+                        children=html.Div([
+                            "Drag & drop invoice .xlsx files here, or ",
+                            html.A("click to browse", className="text-primary fw-bold"),
+                        ], style={"lineHeight": "40px"}),
+                        style={
+                            "borderWidth": "2px", "borderStyle": "dashed",
+                            "borderRadius": "8px", "borderColor": "#adb5bd",
+                            "textAlign": "center", "padding": "8px",
+                            "backgroundColor": "#fafbfc", "cursor": "pointer",
+                        },
+                        multiple=True,
+                    ),
+                    html.Div(id="invoice-upload-status", className="mt-2"),
+                    html.Div(id="invoice-preview-container", className="mt-2"),
+                    html.Div(id="invoice-list-container", className="mt-3"),
                 ], md=12),
             ]),
             html.Hr(className="my-3"),
@@ -5543,7 +5650,9 @@ def update_finances(active_tab, n_clicks, labor_sw, labor_pl, machine_rate,
         dep_table = dash_table.DataTable(
             columns=[
                 {"name": "Deployment", "id": "deployment"},
+                {"name": "Type", "id": "type"},
                 {"name": "Tier", "id": "snow_tier"},
+                {"name": "Source", "id": "source"},
                 {"name": "Sites", "id": "sites_serviced", "type": "numeric"},
                 {"name": "Crews", "id": "crews", "type": "numeric"},
                 {"name": "Hours", "id": "hours", "type": "numeric"},
@@ -5674,6 +5783,523 @@ def save_finance_config(n_clicks, labor_sw, labor_pl, machine_rate,
         return html.Span("Saved!", style={"color": "green"})
     except Exception as e:
         return html.Span(f"Error: {e}", style={"color": "red"})
+
+
+# ── Invoice List on Settings Load ────────────────────────────────────────────
+
+@app.callback(
+    Output("invoice-list-container", "children"),
+    Input("main-tabs", "active_tab"),
+)
+def show_invoice_list_on_load(active_tab):
+    if active_tab != "tab-settings":
+        raise PreventUpdate
+    return _render_invoice_list(SNOW_CONFIG.get("invoices", []))
+
+
+# ── Invoice Upload Callback ──────────────────────────────────────────────────
+
+@app.callback(
+    [Output("invoice-upload-status", "children"),
+     Output("invoice-preview-container", "children"),
+     Output("invoice-list-container", "children", allow_duplicate=True)],
+    Input("upload-invoice", "contents"),
+    State("upload-invoice", "filename"),
+    prevent_initial_call=True,
+)
+def handle_invoice_upload(contents_list, filenames_list):
+    global SNOW_CONFIG
+    if not contents_list:
+        raise PreventUpdate
+    if isinstance(contents_list, str):
+        contents_list = [contents_list]
+        filenames_list = [filenames_list]
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    invoices_registry = SNOW_CONFIG.get("invoices", [])
+
+    all_parsed = []
+    errors = []
+    for content, fname in zip(contents_list, filenames_list):
+        try:
+            _, content_string = content.split(",")
+            decoded = base64.b64decode(content_string)
+            parsed = parse_invoice_bytes(decoded, fname)
+            if parsed:
+                for inv in parsed:
+                    matched_dep = match_invoice_to_deployment(
+                        inv.get("deployment_date"), ALL_DEPLOYMENTS_LIST, tolerance_days=3)
+                    inv["matched_deployment"] = matched_dep
+                    inv_record = {
+                        "filename": fname,
+                        "deployment_type": inv["deployment_type"],
+                        "snow_tier": inv["snow_tier"],
+                        "deployment_date": inv["deployment_date"],
+                        "matched_deployment": matched_dep,
+                        "total_billed": inv["total_billed"],
+                        "site_count": inv["site_count"],
+                        "format": inv["format"],
+                        "line_items": inv["line_items"],
+                    }
+                    existing = [i for i in invoices_registry
+                                if i.get("filename") == fname and i.get("deployment_date") == inv.get("deployment_date")]
+                    if existing:
+                        invoices_registry.remove(existing[0])
+                    invoices_registry.append(inv_record)
+                all_parsed.extend(parsed)
+            else:
+                errors.append(f"{fname}: No invoice data found")
+        except Exception as e:
+            errors.append(f"{fname}: {e}")
+
+    SNOW_CONFIG["invoices"] = invoices_registry
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        errors.append(f"Config save error: {e}")
+
+    if errors:
+        status = html.Div([
+            html.Span(f"Imported {len(all_parsed)} invoice(s). ", style={"color": "green"}),
+            html.Span(f"Errors: {'; '.join(errors)}", style={"color": "red"}),
+        ])
+    else:
+        status = html.Span(f"Successfully imported {len(all_parsed)} invoice(s).", style={"color": "green"})
+
+    preview_rows = []
+    for inv in all_parsed:
+        preview_rows.append(
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6(f"{inv['filename']}", className="mb-1"),
+                    html.P(f"Type: {inv['deployment_type']} | Tier: {inv['snow_tier'].replace('price_', '').replace('_', ' ').title()} | "
+                           f"Sites: {inv['site_count']} | Total: ${inv['total_billed']:,.2f}",
+                           className="mb-1", style={"fontSize": "13px"}),
+                    html.P(f"Date: {inv.get('deployment_date', 'Unknown')} | "
+                           f"Matched Deployment: {inv.get('matched_deployment', 'No match')} | "
+                           f"Format: {inv['format']}",
+                           className="text-muted mb-0", style={"fontSize": "12px"}),
+                ])
+            ], className="mb-2 shadow-sm")
+        )
+
+    inv_list = _render_invoice_list(invoices_registry)
+
+    return status, html.Div(preview_rows), inv_list
+
+
+def _render_invoice_list(invoices_registry):
+    if not invoices_registry:
+        return html.P("No invoices imported yet.", className="text-muted", style={"fontSize": "13px"})
+
+    rows = []
+    for inv in invoices_registry:
+        tier_label = inv.get("snow_tier", "").replace("price_", "").replace("_", " ").title()
+        rows.append({
+            "filename": inv.get("filename", ""),
+            "type": inv.get("deployment_type", ""),
+            "tier": tier_label,
+            "date": inv.get("deployment_date", ""),
+            "deployment": inv.get("matched_deployment", ""),
+            "sites": inv.get("site_count", 0),
+            "total": f"${inv.get('total_billed', 0):,.2f}",
+        })
+
+    return dash_table.DataTable(
+        columns=[
+            {"name": "File", "id": "filename"},
+            {"name": "Type", "id": "type"},
+            {"name": "Tier", "id": "tier"},
+            {"name": "Date", "id": "date"},
+            {"name": "Deployment", "id": "deployment"},
+            {"name": "Sites", "id": "sites", "type": "numeric"},
+            {"name": "Total Billed", "id": "total"},
+        ],
+        data=rows,
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
+        style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px"},
+        page_size=10,
+    )
+
+
+# ── Per-Deployment Labor Overrides Callback ─────────────────────────────────
+
+@app.callback(
+    Output("fin-labor-overrides-container", "children"),
+    Input("main-tabs", "active_tab"),
+    Input("fin-labor-overrides-status", "children"),
+)
+def render_labor_overrides(active_tab, _trigger):
+    if active_tab != "tab-finances":
+        raise PreventUpdate
+
+    if not ALL_DEPLOYMENTS_LIST:
+        return html.P("No deployments available.", className="text-muted", style={"fontSize": "13px"})
+
+    labor_overrides = SNOW_CONFIG.get("labor_overrides", {})
+    all_crews = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
+
+    rows_data = []
+    for dep in ALL_DEPLOYMENTS_LIST:
+        label = dep["label"]
+        dep_overrides = labor_overrides.get(label, {})
+        dep_df = DF_ALL[(DF_ALL.get("deployment") == label) if "deployment" in DF_ALL.columns else DF_ALL["msg_date"].dt.date.between(dep["start_date"], dep["end_date"])]
+        dep_crews = sorted(dep_df["chat"].unique()) if not dep_df.empty else all_crews[:5]
+
+        for crew in dep_crews:
+            crew_override = dep_overrides.get(crew, {})
+            rows_data.append({
+                "deployment": label,
+                "crew": crew,
+                "labor_rate": crew_override.get("labor_rate", ""),
+                "workers": crew_override.get("workers", ""),
+                "hours": crew_override.get("hours", ""),
+            })
+
+    if not rows_data:
+        return html.P("No crew data for labor overrides.", className="text-muted", style={"fontSize": "13px"})
+
+    return dash_table.DataTable(
+        id="fin-labor-overrides-table",
+        columns=[
+            {"name": "Deployment", "id": "deployment"},
+            {"name": "Crew", "id": "crew"},
+            {"name": "Labor $/hr", "id": "labor_rate", "type": "numeric", "editable": True},
+            {"name": "Workers", "id": "workers", "type": "numeric", "editable": True},
+            {"name": "Hours", "id": "hours", "type": "numeric", "editable": True},
+        ],
+        data=rows_data,
+        editable=True,
+        style_table={"overflowX": "auto", "maxHeight": "400px", "overflowY": "auto"},
+        style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
+        style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px",
+                      "position": "sticky", "top": 0},
+        style_data_conditional=[
+            {"if": {"column_editable": True}, "backgroundColor": "#fffde7"},
+        ],
+        page_size=50,
+    )
+
+
+@app.callback(
+    Output("fin-labor-overrides-status", "children"),
+    Input("fin-save-labor-overrides", "n_clicks"),
+    State("fin-labor-overrides-table", "data"),
+    prevent_initial_call=True,
+)
+def save_labor_overrides(n_clicks, table_data):
+    global SNOW_CONFIG
+    if not n_clicks or not table_data:
+        raise PreventUpdate
+
+    labor_overrides = {}
+    for row in table_data:
+        dep = row.get("deployment", "")
+        crew = row.get("crew", "")
+        if not dep or not crew:
+            continue
+        lr = row.get("labor_rate")
+        wk = row.get("workers")
+        hrs = row.get("hours")
+        if lr or wk or hrs:
+            if dep not in labor_overrides:
+                labor_overrides[dep] = {}
+            override = {}
+            if lr and lr != "":
+                try:
+                    override["labor_rate"] = float(lr)
+                except (ValueError, TypeError):
+                    pass
+            if wk and wk != "":
+                try:
+                    override["workers"] = int(wk)
+                except (ValueError, TypeError):
+                    pass
+            if hrs and hrs != "":
+                try:
+                    override["hours"] = float(hrs)
+                except (ValueError, TypeError):
+                    pass
+            if override:
+                labor_overrides[dep][crew] = override
+
+    SNOW_CONFIG["labor_overrides"] = labor_overrides
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+        return html.Span("Labor overrides saved!", style={"color": "green"})
+    except Exception as e:
+        return html.Span(f"Error: {e}", style={"color": "red"})
+
+
+# ── Invoice Reconciliation Callback ─────────────────────────────────────────
+
+@app.callback(
+    Output("fin-recon-deployment", "options"),
+    Input("main-tabs", "active_tab"),
+)
+def populate_recon_deployments(active_tab):
+    if active_tab != "tab-finances":
+        raise PreventUpdate
+    invoices = SNOW_CONFIG.get("invoices", [])
+    options = []
+    seen = set()
+    for inv in invoices:
+        dep = inv.get("matched_deployment")
+        if dep and dep not in seen:
+            seen.add(dep)
+            options.append({"label": f"{dep} ({inv.get('deployment_type', '')})", "value": dep})
+    if not options:
+        for dep in ALL_DEPLOYMENTS_LIST:
+            options.append({"label": dep["label"], "value": dep["label"]})
+    return options
+
+
+@app.callback(
+    Output("fin-recon-container", "children"),
+    Input("fin-recon-btn", "n_clicks"),
+    State("fin-recon-deployment", "value"),
+    prevent_initial_call=True,
+)
+def reconcile_deployment(n_clicks, dep_label):
+    if not n_clicks or not dep_label:
+        raise PreventUpdate
+
+    invoices = SNOW_CONFIG.get("invoices", [])
+    matched_invoices = [inv for inv in invoices if inv.get("matched_deployment") == dep_label]
+    if not matched_invoices:
+        return html.P(f"No invoices found for deployment '{dep_label}'. Upload invoices in Settings first.",
+                      className="text-muted")
+
+    dep_info = next((d for d in ALL_DEPLOYMENTS_LIST if d["label"] == dep_label), None)
+    if not dep_info:
+        return html.P("Deployment not found.", className="text-muted")
+
+    start = pd.Timestamp(dep_info["start_date"])
+    end = pd.Timestamp(dep_info["end_date"])
+    df_clean = DF_ALL[(DF_ALL["noise_type"] == "clean") &
+                      (DF_ALL["msg_date"] >= start) &
+                      (DF_ALL["msg_date"] <= end + pd.Timedelta(days=1))]
+    chat_locations = list(df_clean[df_clean["location"].str.len() > 0]["location"].unique()) if not df_clean.empty else []
+
+    results_children = []
+    for inv in matched_invoices:
+        recon = reconcile_invoice_with_chat(inv, chat_locations, PRICING_INDEX, _normalize_location)
+
+        summary = dbc.Alert([
+            html.Strong(f"{inv.get('filename', 'Invoice')} — {inv.get('deployment_type', '')}"),
+            html.Br(),
+            html.Span(f"Invoiced: {recon['sites_invoiced']} sites | "
+                      f"Found in chat: {recon['sites_in_chat']} | "
+                      f"Not in chat: {recon['sites_not_in_chat']} | "
+                      f"Price mismatches: {recon['price_mismatches']} | "
+                      f"Chat but not invoiced: {recon['chat_not_invoiced_count']}"),
+        ], color="info" if recon["sites_not_in_chat"] == 0 else "warning", className="mb-2")
+
+        issue_rows = [r for r in recon["line_items"] if r["status"] != "ok"]
+        if issue_rows:
+            issue_table = dash_table.DataTable(
+                columns=[
+                    {"name": "Building", "id": "building_name"},
+                    {"name": "Address", "id": "address"},
+                    {"name": "Billed", "id": "billed_amount", "type": "numeric"},
+                    {"name": "Contract", "id": "contract_price", "type": "numeric"},
+                    {"name": "In Chat?", "id": "in_chat_data"},
+                    {"name": "Status", "id": "status"},
+                    {"name": "Notes", "id": "notes"},
+                ],
+                data=[{k: (f"${v:,.2f}" if k in ("billed_amount", "contract_price") and v else v)
+                       for k, v in r.items() if k != "matched_chat_location"} for r in issue_rows],
+                style_table={"overflowX": "auto"},
+                style_cell={"textAlign": "left", "padding": "4px", "fontSize": "11px"},
+                style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "11px"},
+                style_data_conditional=[
+                    {"if": {"filter_query": '{status} = "not_in_chat"'}, "backgroundColor": "#fff3cd"},
+                    {"if": {"filter_query": '{status} = "price_mismatch"'}, "backgroundColor": "#f8d7da"},
+                ],
+                page_size=20,
+            )
+        else:
+            issue_table = html.P("All invoiced sites match chat data.", className="text-success",
+                                style={"fontSize": "13px"})
+
+        chat_missing = recon.get("chat_not_invoiced", [])
+        if chat_missing:
+            missing_list = html.Details([
+                html.Summary(f"{len(chat_missing)} site(s) in chat but not invoiced",
+                            style={"fontSize": "13px", "color": "#856404", "cursor": "pointer"}),
+                html.Ul([html.Li(loc, style={"fontSize": "12px"}) for loc in chat_missing[:30]]),
+            ], className="mt-1")
+        else:
+            missing_list = html.Div()
+
+        results_children.extend([summary, issue_table, missing_list])
+
+    return html.Div(results_children)
+
+
+# ── Completion Verification Callback ────────────────────────────────────────
+
+@app.callback(
+    Output("fin-verify-deployment", "options"),
+    Input("main-tabs", "active_tab"),
+)
+def populate_verify_deployments(active_tab):
+    if active_tab != "tab-finances":
+        raise PreventUpdate
+    invoices = SNOW_CONFIG.get("invoices", [])
+    options = []
+    seen = set()
+    for inv in invoices:
+        if inv.get("format") in ("completion_report", "pretreatment_report"):
+            dep = inv.get("matched_deployment")
+            if dep and dep not in seen:
+                seen.add(dep)
+                options.append({"label": f"{dep} ({inv.get('deployment_type', '')})", "value": dep})
+    if not options:
+        for dep in ALL_DEPLOYMENTS_LIST:
+            options.append({"label": dep["label"], "value": dep["label"]})
+    return options
+
+
+@app.callback(
+    Output("fin-verify-container", "children"),
+    Input("fin-verify-btn", "n_clicks"),
+    State("fin-verify-deployment", "value"),
+    prevent_initial_call=True,
+)
+def verify_completion(n_clicks, dep_label):
+    if not n_clicks or not dep_label:
+        raise PreventUpdate
+
+    invoices = SNOW_CONFIG.get("invoices", [])
+    completion_invoices = [inv for inv in invoices
+                          if inv.get("matched_deployment") == dep_label
+                          and inv.get("format") in ("completion_report", "pretreatment_report")]
+
+    if not completion_invoices:
+        return html.P(f"No completion/pre-treatment reports found for '{dep_label}'. "
+                      "Upload portal completion reports (Excel) in Settings.",
+                      className="text-muted")
+
+    dep_info = next((d for d in ALL_DEPLOYMENTS_LIST if d["label"] == dep_label), None)
+    if not dep_info:
+        return html.P("Deployment not found.", className="text-muted")
+
+    start = pd.Timestamp(dep_info["start_date"])
+    end = pd.Timestamp(dep_info["end_date"])
+    df_clean = DF_ALL[(DF_ALL["noise_type"] == "clean") &
+                      (DF_ALL["msg_date"] >= start) &
+                      (DF_ALL["msg_date"] <= end + pd.Timedelta(days=1))]
+
+    chat_locs_by_crew = {}
+    if not df_clean.empty:
+        for _, row in df_clean[df_clean["location"].str.len() > 0].iterrows():
+            crew = row["chat"]
+            loc = row["location"]
+            if crew not in chat_locs_by_crew:
+                chat_locs_by_crew[crew] = set()
+            chat_locs_by_crew[crew].add(_normalize_location(loc))
+
+    results_children = []
+    for inv in completion_invoices:
+        verify_rows = []
+        for item in inv.get("line_items", []):
+            bname = item.get("building_name", "")
+            bname_norm = _normalize_location(bname)
+
+            portal_crew = item.get("removal_crew") or item.get("pretreatment_crew") or item.get("created_by", "")
+            portal_time = item.get("created_time", "")
+            pct_done = item.get("pct_completed", "")
+            sw_done = item.get("sidewalks_cleared") or item.get("sidewalks_pretreated", "")
+            pl_done = item.get("parking_cleared") or item.get("parking_pretreated", "")
+
+            chat_crew_found = None
+            chat_confirmed = False
+            for crew, locs in chat_locs_by_crew.items():
+                if bname_norm in locs:
+                    chat_crew_found = crew
+                    chat_confirmed = True
+                    break
+                for loc in locs:
+                    if bname_norm and (bname_norm in loc or loc in bname_norm):
+                        chat_crew_found = crew
+                        chat_confirmed = True
+                        break
+                if chat_confirmed:
+                    break
+
+            status = "verified" if chat_confirmed else "unverified"
+            crew_match = ""
+            if portal_crew and chat_crew_found:
+                crew_match = "match" if _normalize_location(portal_crew) in _normalize_location(chat_crew_found) else "different"
+            elif not portal_crew and chat_crew_found:
+                crew_match = "chat only"
+            elif portal_crew and not chat_crew_found:
+                crew_match = "portal only"
+
+            verify_rows.append({
+                "building": bname,
+                "portal_crew": portal_crew,
+                "portal_time": str(portal_time),
+                "completion": str(pct_done) if pct_done else "",
+                "sw": str(sw_done),
+                "pl": str(pl_done),
+                "chat_crew": chat_crew_found or "",
+                "status": status,
+                "crew_match": crew_match,
+            })
+
+        verified = sum(1 for r in verify_rows if r["status"] == "verified")
+        unverified = sum(1 for r in verify_rows if r["status"] == "unverified")
+
+        summary = dbc.Alert([
+            html.Strong(f"{inv.get('filename', 'Report')} — {inv.get('deployment_type', '')}"),
+            html.Br(),
+            html.Span(f"Total sites: {len(verify_rows)} | "
+                      f"Verified in chat: {verified} | "
+                      f"Unverified: {unverified}"),
+        ], color="success" if unverified == 0 else "warning", className="mb-2")
+
+        vtable = dash_table.DataTable(
+            columns=[
+                {"name": "Building", "id": "building"},
+                {"name": "Portal Crew", "id": "portal_crew"},
+                {"name": "Portal Time", "id": "portal_time"},
+                {"name": "Completion", "id": "completion"},
+                {"name": "SW", "id": "sw"},
+                {"name": "PL", "id": "pl"},
+                {"name": "Chat Crew", "id": "chat_crew"},
+                {"name": "Status", "id": "status"},
+                {"name": "Crew Match", "id": "crew_match"},
+            ],
+            data=verify_rows,
+            style_table={"overflowX": "auto"},
+            style_cell={"textAlign": "left", "padding": "4px", "fontSize": "11px"},
+            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "11px"},
+            style_data_conditional=[
+                {"if": {"filter_query": '{status} = "unverified"'}, "backgroundColor": "#fff3cd"},
+                {"if": {"filter_query": '{status} = "verified"'}, "backgroundColor": "#d4edda"},
+                {"if": {"filter_query": '{crew_match} = "different"'}, "color": "#dc3545", "fontWeight": "bold"},
+            ],
+            page_size=30,
+        )
+
+        results_children.extend([summary, vtable, html.Hr(className="my-2")])
+
+    return html.Div(results_children)
+
+
+# ── Apply Labor Overrides in Financial Calculations ─────────────────────────
+
+def _get_crew_labor_override(dep_label, crew_chat, snow_config):
+    overrides = snow_config.get("labor_overrides", {})
+    dep_overrides = overrides.get(dep_label, {})
+    return dep_overrides.get(crew_chat, {})
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

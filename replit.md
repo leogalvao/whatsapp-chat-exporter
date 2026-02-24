@@ -62,6 +62,20 @@ JSON chat exports are gitignored. Place exported files in `data/archive/` or `da
 4. **_dispatches.json** — OCR dispatch correlation data (auto-skipped during chat discovery).
 
 ## Recent Changes
+- 2026-02-24: Invoice Excel import with reconciliation and completion verification
+  - Invoice parser (data/invoice_parser.py) supporting 3 auto-detected formats: simple billing, pre-treatment reports, completion reports
+  - Auto-detects deployment type (Snow Removal, Ice Removal, Pre-Treatment, Snow Melt) from filename/title priority, then headers
+  - Auto-detects snow tier from price column headers (Melt Only, <6", 6"-12", 12"-24")
+  - Date extraction from filenames (e.g., 2026-01-26_-_Snow_Removal.xlsx)
+  - Invoice upload UI in Settings tab with drag-and-drop, preview table, and deployment auto-matching (3-day tolerance)
+  - Invoice data stored in snow_removal.json["invoices"], matched to deployments by date
+  - Invoice reconciliation: compares billed sites vs chat-tracked sites, flags discrepancies (missing from chat, missing from invoice)
+  - Completion verification: cross-references portal completion reports (crew assignments, timestamps, pct_completed) with chat data
+  - Per-deployment labor cost overrides: editable DataTable for labor rate, workers, hours per crew per deployment
+  - Labor overrides persist to snow_removal.json["labor_overrides"] and apply during financial recalculation
+  - _compute_financials uses actual invoice revenue when available, falls back to contract pricing estimates
+  - Deployment financials table shows Type, Tier, Source (Invoice/Estimated) columns
+  - Pricing data cross-referenced via normalized location matching (_normalize_location)
 - 2026-02-24: Deployment breakdown with crew-location reassignment and map deployment filter
   - Deployment Breakdown section on Deployments tab: select a deployment to see all serviced locations
   - Auto-detected crew assignments shown alongside editable dropdown overrides (Sidewalk/Parking Lot crews)
