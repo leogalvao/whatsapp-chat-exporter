@@ -20,18 +20,20 @@ A Python Dash web application that analyzes exported WhatsApp chat data with int
   - Job log builder, crew summary, route segments, deployment burndown
   - Location type stats, traffic analysis, delay report, recall detection
   - Trackable sender filtering
-- `data/config/snow_removal.json` - Configuration for deployment types, location types, expected service times, non-trackable senders, standard travel times
+- `data/config/snow_removal.json` - Configuration for deployment types, location types, expected service times, non-trackable senders, standard travel times, finance config
+- `data/config/pricing.json` - Contract pricing data (695 sites with tiered snow removal prices)
 
 ## Dashboard Structure
-The dashboard has 8 tabs:
+The dashboard has 9 tabs:
 1. **Overview** - Message volume, types, activity heatmap, sender participation, daily timeline
 2. **Productivity** - Daily productivity scores, crew leaderboard with rankings, first report times, reporting windows, idle time detection, daily message trends
 3. **Crew Analysis** - Per-sender metrics, message gaps, crew scorecards, sites/hour, transition times, route timelines, pace consistency, top locations
 4. **Deployments** - Deployment summary, timeline, cross-deployment comparison, performance trends, sites heatmap, downloadable HTML reports
 5. **Operations** - Routing Gantt chart, deployment burn-down (actual vs 12hr expected pace), location type performance, traffic analysis, delay report, recall summary
-6. **Map** - DC Service Map with OpenStreetMap tiles, DC boundary polygon from ArcGIS API, location dots color-coded by crew, marker size by visit frequency
-7. **Data Quality** - Noise filtering overview, raw message data table
-8. **Settings** - Crew location type assignment (Sidewalk/Parking Lot), non-trackable sender management, expected deployment hours, service time configuration, location registry upload
+6. **Finances** - Revenue forecasting, cost analysis, profit metrics from contract pricing cross-referenced with operational data
+7. **Map** - DC Service Map with OpenStreetMap tiles, DC boundary polygon from ArcGIS API, location dots color-coded by crew, marker size by visit frequency
+8. **Data Quality** - Noise filtering overview, raw message data table
+9. **Settings** - Crew location type assignment (Sidewalk/Parking Lot), non-trackable sender management, expected deployment hours, service time configuration, location registry upload
 
 ### Key Dashboard Features
 - **KPI Summary Bar**: Always-visible row of 6 metric cards (Total Messages, Active Crews, Avg Sites/Hour, Avg First Report, Total Sites, Avg Transition)
@@ -53,6 +55,16 @@ The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads Wha
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
 
 ## Recent Changes
+- 2026-02-24: Finances tab with contract pricing cross-reference
+  - Imported 695-site contract pricing from Excel proposal (4 snow depth tiers)
+  - Pricing stored in data/config/pricing.json, matched to serviced locations by normalized address/name
+  - 6 KPI cards: Total Revenue, Total Costs, Profit, Profit Margin, Sites Matched, Revenue/Deployment
+  - Editable cost inputs: labor rate ($/hr), supply cost ($/site), equipment cost ($/deployment)
+  - Selectable default snow tier (Melt Only, <6", 6"-12", 12"-24")
+  - Per-deployment financials table (revenue, labor, supplies, equipment, profit, margin)
+  - Per-crew financials table (sites, hours, revenue attributed, labor cost, profit, $/hour)
+  - Revenue vs Costs grouped bar chart by deployment
+  - Finance config persists to snow_removal.json; recalculate button for live adjustments
 - 2026-02-24: v2 CrewChatData format support
   - Auto-detects new JSON format with id, isOutgoing, isForwarded, isDeleted, media details
   - isDeleted messages classified as "deleted" noise type (filtered from clean metrics)

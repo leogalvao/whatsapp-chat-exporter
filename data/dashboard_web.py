@@ -515,6 +515,170 @@ def load_all_data(data_dir):
 DF_ALL = load_all_data(DATA_DIR)
 SNOW_CONFIG = load_config(os.path.join(DATA_DIR, "config", "snow_removal.json"))
 
+
+def load_pricing(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+PRICING_DATA = load_pricing(os.path.join(DATA_DIR, "config", "pricing.json"))
+PRICING_INDEX = {}
+for p in PRICING_DATA:
+    addr_norm = _normalize_location(p.get("address", ""))
+    if addr_norm:
+        PRICING_INDEX[addr_norm] = p
+    name_norm = _normalize_location(p.get("building_name", ""))
+    if name_norm:
+        PRICING_INDEX[name_norm] = p
+
+
+def _match_location_to_pricing(location, pricing_index):
+    if not location:
+        return None
+    norm = _normalize_location(location)
+    if not norm or len(norm) < 4:
+        return None
+    if norm in pricing_index:
+        return pricing_index[norm]
+    for key, entry in pricing_index.items():
+        if len(key) < 6 or len(norm) < 6:
+            continue
+        if norm in key or key in norm:
+            return entry
+    return None
+
+
+def _compute_financials(df, deployments_list, snow_config, pricing_index):
+    finance_cfg = snow_config.get("finance_config", {})
+    labor_rate = finance_cfg.get("labor_rate_per_hour", 35.0)
+    supply_cost_per_site = finance_cfg.get("supply_cost_per_site", 15.0)
+    equipment_cost_per_deployment = finance_cfg.get("equipment_cost_per_deployment", 500.0)
+    default_tier = finance_cfg.get("default_snow_tier", "price_under_6in")
+    deployment_tiers = finance_cfg.get("deployment_snow_tiers", {})
+
+    if df.empty or not deployments_list:
+        return {
+            "deployment_financials": [],
+            "crew_financials": [],
+            "total_revenue": 0, "total_costs": 0, "total_profit": 0,
+            "profit_margin": 0, "sites_serviced": 0, "sites_contracted": len(pricing_index) // 2,
+            "avg_revenue_per_site": 0, "avg_cost_per_crew": 0,
+            "revenue_per_deployment": 0,
+        }
+
+    df_clean = df[df["noise_type"] == "clean"].copy()
+
+    dep_financials = []
+    crew_data = {}
+    total_revenue = 0
+    total_costs = 0
+    all_serviced_locations = set()
+
+    for dep in deployments_list:
+        label = dep["label"]
+        start = pd.Timestamp(dep["start_date"])
+        end = pd.Timestamp(dep["end_date"])
+        tier = deployment_tiers.get(label, default_tier)
+
+        dep_df = df_clean[(df_clean["msg_date"] >= start) & (df_clean["msg_date"] <= end + pd.Timedelta(days=1))]
+
+        dep_locations = dep_df[dep_df["location"].str.len() > 0]["location"].unique()
+
+        dep_revenue = 0
+        matched_sites = 0
+        for loc in dep_locations:
+            pricing = _match_location_to_pricing(loc, pricing_index)
+            if pricing:
+                price = pricing.get(tier, pricing.get("price_under_6in", 0))
+                dep_revenue += price
+                matched_sites += 1
+                all_serviced_locations.add(loc)
+
+        dep_crews = dep_df[dep_df["sender_resolved"] != ""]["sender_resolved"].unique()
+        n_crews = len(dep_crews)
+
+        dep_hours = 0
+        for crew in dep_crews:
+            crew_msgs = dep_df[dep_df["sender_resolved"] == crew]
+            if len(crew_msgs) >= 2:
+                time_range = crew_msgs["time"].dropna()
+                if len(time_range) >= 2:
+                    hrs = (time_range.max() - time_range.min()).total_seconds() / 3600
+                    dep_hours += hrs
+
+                    if crew not in crew_data:
+                        crew_data[crew] = {"hours": 0, "sites": 0, "revenue": 0, "deployments": 0}
+                    crew_data[crew]["hours"] += hrs
+                    crew_data[crew]["deployments"] += 1
+
+        for crew in dep_crews:
+            if crew in crew_data:
+                crew_data[crew]["sites"] += matched_sites / max(n_crews, 1)
+                crew_data[crew]["revenue"] += dep_revenue / max(n_crews, 1)
+
+        labor_cost = dep_hours * labor_rate
+        supply_cost = matched_sites * supply_cost_per_site
+        equip_cost = equipment_cost_per_deployment
+        dep_total_cost = labor_cost + supply_cost + equip_cost
+        dep_profit = dep_revenue - dep_total_cost
+        dep_margin = (dep_profit / dep_revenue * 100) if dep_revenue > 0 else 0
+
+        dep_financials.append({
+            "deployment": label,
+            "snow_tier": tier.replace("price_", "").replace("_", " ").title(),
+            "sites_serviced": matched_sites,
+            "total_sites": len(dep_locations),
+            "crews": n_crews,
+            "hours": round(dep_hours, 1),
+            "revenue": round(dep_revenue, 2),
+            "labor_cost": round(labor_cost, 2),
+            "supply_cost": round(supply_cost, 2),
+            "equipment_cost": round(equip_cost, 2),
+            "total_cost": round(dep_total_cost, 2),
+            "profit": round(dep_profit, 2),
+            "margin": round(dep_margin, 1),
+        })
+
+        total_revenue += dep_revenue
+        total_costs += dep_total_cost
+
+    crew_financials = []
+    for crew, data in sorted(crew_data.items(), key=lambda x: x[1]["revenue"], reverse=True):
+        crew_cost = data["hours"] * labor_rate
+        crew_profit = data["revenue"] - crew_cost
+        crew_financials.append({
+            "crew": crew,
+            "deployments": data["deployments"],
+            "sites": round(data["sites"], 1),
+            "hours": round(data["hours"], 1),
+            "revenue": round(data["revenue"], 2),
+            "labor_cost": round(crew_cost, 2),
+            "profit": round(crew_profit, 2),
+            "rate_per_hour": round(data["revenue"] / max(data["hours"], 0.1), 2),
+        })
+
+    total_profit = total_revenue - total_costs
+    n_deps = len(deployments_list)
+    n_crews_total = len(crew_data)
+
+    return {
+        "deployment_financials": dep_financials,
+        "crew_financials": crew_financials,
+        "total_revenue": round(total_revenue, 2),
+        "total_costs": round(total_costs, 2),
+        "total_profit": round(total_profit, 2),
+        "profit_margin": round((total_profit / total_revenue * 100) if total_revenue > 0 else 0, 1),
+        "sites_serviced": len(all_serviced_locations),
+        "sites_contracted": len(PRICING_DATA),
+        "avg_revenue_per_site": round(total_revenue / max(len(all_serviced_locations), 1), 2),
+        "avg_cost_per_crew": round(total_costs / max(n_crews_total, 1), 2),
+        "revenue_per_deployment": round(total_revenue / max(n_deps, 1), 2),
+    }
+
+
 # Precompute lists for filters
 ALL_CHATS = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
 _non_trackable_init = set(SNOW_CONFIG.get("non_trackable_senders", []))
@@ -1073,6 +1237,93 @@ main_content = dbc.Tabs(
             ]),
             dcc.Store(id="map-data-store"),
         ]),
+        dbc.Tab(label="Finances", tab_id="tab-finances", children=[
+            html.Div([
+                html.H4("Financial Overview", className="mb-1"),
+                html.P("Revenue forecasting, cost analysis, and profit metrics based on contract pricing and operational data.",
+                       className="text-muted mb-3", style={"fontSize": "14px"}),
+            ], className="mt-3 mb-2 px-1"),
+            dbc.Row([
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Total Revenue", className="text-muted mb-1", style={"fontSize": "12px"}),
+                    html.H4(id="fin-kpi-revenue", className="mb-0", style={"color": "#28a745"}),
+                ])], className="shadow-sm"), md=2),
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Total Costs", className="text-muted mb-1", style={"fontSize": "12px"}),
+                    html.H4(id="fin-kpi-costs", className="mb-0", style={"color": "#dc3545"}),
+                ])], className="shadow-sm"), md=2),
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Profit", className="text-muted mb-1", style={"fontSize": "12px"}),
+                    html.H4(id="fin-kpi-profit", className="mb-0"),
+                ])], className="shadow-sm"), md=2),
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Profit Margin", className="text-muted mb-1", style={"fontSize": "12px"}),
+                    html.H4(id="fin-kpi-margin", className="mb-0"),
+                ])], className="shadow-sm"), md=2),
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Sites Matched", className="text-muted mb-1", style={"fontSize": "12px"}),
+                    html.H4(id="fin-kpi-sites", className="mb-0"),
+                ])], className="shadow-sm"), md=2),
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Rev / Deployment", className="text-muted mb-1", style={"fontSize": "12px"}),
+                    html.H4(id="fin-kpi-rev-dep", className="mb-0", style={"color": "#17a2b8"}),
+                ])], className="shadow-sm"), md=2),
+            ], className="mb-3"),
+            html.H5("Cost Configuration", className="mt-3 mb-2"),
+            html.P("Adjust labor, supply, and equipment costs. Changes are saved and applied to forecasts.",
+                   className="text-muted mb-2", style={"fontSize": "13px"}),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Labor Rate ($/hour)", className="mb-1"),
+                    dbc.Input(id="fin-labor-rate", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("labor_rate_per_hour", 35.0),
+                              min=0, step=0.5, style={"maxWidth": "180px"}),
+                ], md=2),
+                dbc.Col([
+                    dbc.Label("Supply Cost ($/site)", className="mb-1"),
+                    dbc.Input(id="fin-supply-cost", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("supply_cost_per_site", 15.0),
+                              min=0, step=0.5, style={"maxWidth": "180px"}),
+                ], md=2),
+                dbc.Col([
+                    dbc.Label("Equipment ($/deployment)", className="mb-1"),
+                    dbc.Input(id="fin-equip-cost", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("equipment_cost_per_deployment", 500.0),
+                              min=0, step=10, style={"maxWidth": "180px"}),
+                ], md=2),
+                dbc.Col([
+                    dbc.Label("Default Snow Tier", className="mb-1"),
+                    dcc.Dropdown(
+                        id="fin-default-tier",
+                        options=[
+                            {"label": "Melt Only", "value": "price_melt_only"},
+                            {"label": "Under 6\"", "value": "price_under_6in"},
+                            {"label": "6\"-12\"", "value": "price_6_to_12in"},
+                            {"label": "12\"-24\"", "value": "price_12_to_24in"},
+                        ],
+                        value=SNOW_CONFIG.get("finance_config", {}).get("default_snow_tier", "price_under_6in"),
+                        clearable=False,
+                        style={"maxWidth": "200px"},
+                    ),
+                ], md=2),
+                dbc.Col([
+                    dbc.Button("Recalculate", id="fin-recalc-btn", color="primary",
+                               className="mt-4", n_clicks=0),
+                    dbc.Button("Save Costs", id="fin-save-btn", color="success",
+                               className="mt-4 ms-2", n_clicks=0),
+                    html.Span(id="fin-save-status", className="ms-2 align-middle mt-4"),
+                ], md=4),
+            ], className="mb-3"),
+            html.Hr(className="my-3"),
+            html.H5("Deployment Financials", className="mb-2"),
+            html.Div(id="fin-deployment-table-container"),
+            html.Hr(className="my-3"),
+            html.H5("Crew Financials", className="mb-2"),
+            html.Div(id="fin-crew-table-container"),
+            html.Hr(className="my-3"),
+            html.H5("Revenue vs Costs by Deployment", className="mb-2"),
+            dcc.Graph(id="fin-chart-revenue"),
+        ]),
         dbc.Tab(label="Data Quality", tab_id="tab-quality", children=[
             html.Div([
                 html.H4("Data Quality", className="mb-1"),
@@ -1520,6 +1771,7 @@ def _reload_global_data():
     global ALL_DEPLOYMENTS, _date_to_deployment
     global TOTAL_MSGS, CLEAN_MSGS, NOISE_MSGS, NUM_CHATS, NUM_SENDERS
     global SNOW_CONFIG
+    global PRICING_DATA, PRICING_INDEX
 
     DF_ALL = load_all_data(DATA_DIR)
     ALL_CHATS = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
@@ -1558,6 +1810,16 @@ def _reload_global_data():
     NUM_CHATS = DF_ALL["chat"].nunique() if not DF_ALL.empty else 0
     NUM_SENDERS = len(ALL_SENDERS_RESOLVED)
     SNOW_CONFIG = load_config(os.path.join(DATA_DIR, "config", "snow_removal.json"))
+
+    PRICING_DATA = load_pricing(os.path.join(DATA_DIR, "config", "pricing.json"))
+    PRICING_INDEX = {}
+    for p in PRICING_DATA:
+        addr_norm = _normalize_location(p.get("address", ""))
+        if addr_norm:
+            PRICING_INDEX[addr_norm] = p
+        name_norm = _normalize_location(p.get("building_name", ""))
+        if name_norm:
+            PRICING_INDEX[name_norm] = p
 
 
 @app.callback(
@@ -4549,6 +4811,163 @@ def _empty_fig(title):
         height=400,
     )
     return fig
+
+
+# ── Finances callbacks ───────────────────────────────────────────────────────
+
+@app.callback(
+    Output("fin-kpi-revenue", "children"),
+    Output("fin-kpi-costs", "children"),
+    Output("fin-kpi-profit", "children"),
+    Output("fin-kpi-profit", "style"),
+    Output("fin-kpi-margin", "children"),
+    Output("fin-kpi-margin", "style"),
+    Output("fin-kpi-sites", "children"),
+    Output("fin-kpi-rev-dep", "children"),
+    Output("fin-deployment-table-container", "children"),
+    Output("fin-crew-table-container", "children"),
+    Output("fin-chart-revenue", "figure"),
+    Input("main-tabs", "active_tab"),
+    Input("fin-recalc-btn", "n_clicks"),
+    State("fin-labor-rate", "value"),
+    State("fin-supply-cost", "value"),
+    State("fin-equip-cost", "value"),
+    State("fin-default-tier", "value"),
+)
+def update_finances(active_tab, n_clicks, labor_rate, supply_cost, equip_cost, default_tier):
+    if active_tab != "tab-finances":
+        raise PreventUpdate
+    try:
+        temp_config = dict(SNOW_CONFIG)
+        temp_config["finance_config"] = {
+            "labor_rate_per_hour": labor_rate or 35.0,
+            "supply_cost_per_site": supply_cost or 15.0,
+            "equipment_cost_per_deployment": equip_cost or 500.0,
+            "default_snow_tier": default_tier or "price_under_6in",
+            "deployment_snow_tiers": SNOW_CONFIG.get("finance_config", {}).get("deployment_snow_tiers", {}),
+        }
+
+        fin = _compute_financials(DF_ALL, ALL_DEPLOYMENTS_LIST, temp_config, PRICING_INDEX)
+
+        rev_str = f"${fin['total_revenue']:,.0f}"
+        cost_str = f"${fin['total_costs']:,.0f}"
+        profit_str = f"${fin['total_profit']:,.0f}"
+        profit_color = "#28a745" if fin['total_profit'] >= 0 else "#dc3545"
+        margin_str = f"{fin['profit_margin']:.1f}%"
+        margin_color = "#28a745" if fin['profit_margin'] >= 0 else "#dc3545"
+        sites_str = f"{fin['sites_serviced']} / {fin['sites_contracted']}"
+        rev_dep_str = f"${fin['revenue_per_deployment']:,.0f}"
+
+        dep_table = dash_table.DataTable(
+            columns=[
+                {"name": "Deployment", "id": "deployment"},
+                {"name": "Snow Tier", "id": "snow_tier"},
+                {"name": "Sites", "id": "sites_serviced", "type": "numeric"},
+                {"name": "Crews", "id": "crews", "type": "numeric"},
+                {"name": "Hours", "id": "hours", "type": "numeric"},
+                {"name": "Revenue", "id": "revenue", "type": "numeric"},
+                {"name": "Labor", "id": "labor_cost", "type": "numeric"},
+                {"name": "Supplies", "id": "supply_cost", "type": "numeric"},
+                {"name": "Equipment", "id": "equipment_cost", "type": "numeric"},
+                {"name": "Total Cost", "id": "total_cost", "type": "numeric"},
+                {"name": "Profit", "id": "profit", "type": "numeric"},
+                {"name": "Margin %", "id": "margin", "type": "numeric"},
+            ],
+            data=fin["deployment_financials"],
+            style_table={"overflowX": "auto"},
+            style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5"},
+            style_data_conditional=[
+                {"if": {"filter_query": "{profit} < 0"}, "color": "#dc3545", "fontWeight": "bold"},
+                {"if": {"filter_query": "{margin} >= 20"}, "color": "#28a745"},
+            ],
+            page_size=20,
+        ) if fin["deployment_financials"] else html.P("No deployment financial data available.", className="text-muted")
+
+        crew_table = dash_table.DataTable(
+            columns=[
+                {"name": "Crew", "id": "crew"},
+                {"name": "Deployments", "id": "deployments", "type": "numeric"},
+                {"name": "Sites", "id": "sites", "type": "numeric"},
+                {"name": "Hours", "id": "hours", "type": "numeric"},
+                {"name": "Revenue", "id": "revenue", "type": "numeric"},
+                {"name": "Labor Cost", "id": "labor_cost", "type": "numeric"},
+                {"name": "Profit", "id": "profit", "type": "numeric"},
+                {"name": "$/Hour", "id": "rate_per_hour", "type": "numeric"},
+            ],
+            data=fin["crew_financials"],
+            style_table={"overflowX": "auto"},
+            style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
+            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5"},
+            style_data_conditional=[
+                {"if": {"filter_query": "{profit} < 0"}, "color": "#dc3545"},
+            ],
+            page_size=20,
+        ) if fin["crew_financials"] else html.P("No crew financial data available.", className="text-muted")
+
+        if fin["deployment_financials"]:
+            dep_df = pd.DataFrame(fin["deployment_financials"])
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="Revenue", x=dep_df["deployment"], y=dep_df["revenue"],
+                                marker_color="#28a745"))
+            fig.add_trace(go.Bar(name="Total Cost", x=dep_df["deployment"], y=dep_df["total_cost"],
+                                marker_color="#dc3545"))
+            fig.add_trace(go.Bar(name="Profit", x=dep_df["deployment"], y=dep_df["profit"],
+                                marker_color="#17a2b8"))
+            fig.update_layout(barmode="group", template="plotly_white",
+                            margin=dict(l=40, r=20, t=30, b=40),
+                            legend=dict(orientation="h", y=1.1),
+                            yaxis_title="Amount ($)")
+        else:
+            fig = go.Figure()
+            fig.update_layout(template="plotly_white",
+                            annotations=[{"text": "No financial data", "showarrow": False,
+                                         "font": {"size": 16, "color": "gray"}}])
+
+        return (rev_str, cost_str, profit_str, {"color": profit_color},
+                margin_str, {"color": margin_color},
+                sites_str, rev_dep_str,
+                dep_table, crew_table, fig)
+    except Exception as e:
+        print(f"[Finances] Error: {e}")
+        import traceback; traceback.print_exc()
+        empty_fig = go.Figure()
+        empty_fig.update_layout(template="plotly_white")
+        return ("$0", "$0", "$0", {}, "0%", {}, "0 / 0", "$0",
+                html.P("Error computing financials.", className="text-muted"),
+                html.P("Error computing financials.", className="text-muted"),
+                empty_fig)
+
+
+@app.callback(
+    Output("fin-save-status", "children"),
+    Input("fin-save-btn", "n_clicks"),
+    State("fin-labor-rate", "value"),
+    State("fin-supply-cost", "value"),
+    State("fin-equip-cost", "value"),
+    State("fin-default-tier", "value"),
+    prevent_initial_call=True,
+)
+def save_finance_config(n_clicks, labor_rate, supply_cost, equip_cost, default_tier):
+    if not n_clicks:
+        raise PreventUpdate
+    try:
+        config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+        config = load_config(config_path)
+        config["finance_config"] = {
+            "labor_rate_per_hour": labor_rate or 35.0,
+            "supply_cost_per_site": supply_cost or 15.0,
+            "equipment_cost_per_deployment": equip_cost or 500.0,
+            "default_snow_tier": default_tier or "price_under_6in",
+            "deployment_snow_tiers": config.get("finance_config", {}).get("deployment_snow_tiers", {}),
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        global SNOW_CONFIG
+        SNOW_CONFIG = config
+        return html.Span("Saved!", style={"color": "green"})
+    except Exception as e:
+        return html.Span(f"Error: {e}", style={"color": "red"})
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
