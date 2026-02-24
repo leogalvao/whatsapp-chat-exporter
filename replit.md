@@ -58,13 +58,18 @@ JSON chat exports are gitignored. Place exported files in `data/archive/` or `da
 - 2026-02-24: Finances tab with contract pricing cross-reference
   - Imported 695-site contract pricing from Excel proposal (4 snow depth tiers)
   - Pricing stored in data/config/pricing.json, matched to serviced locations by normalized address/name
-  - 6 KPI cards: Total Revenue, Total Costs, Profit, Profit Margin, Sites Matched, Revenue/Deployment
-  - Editable cost inputs: labor rate ($/hr), supply cost ($/site), equipment cost ($/deployment)
+  - 8 KPI cards: Total Revenue, Total Costs, Profit, Margin %, Sites Matched, Salt Used (lbs), Cost/Hour, Rev/Deployment
+  - Crew-type-aware costing: separate sidewalk vs parking lot labor rates, worker counts, salt usage
+  - Parking lot crews capped at 2 workers (truck-based), sidewalk crews configurable worker count
+  - Machine cost for parking lot crews (hourly rate), material/salt cost by crew type
+  - Overhead % applied to direct costs (labor + machine + material)
+  - Editable cost inputs: sidewalk labor $/hr, parking labor $/hr, machine $/hr, salt $/lb, salt lbs/site (SW/PL), workers (SW/PL), overhead %, snow tier
   - Selectable default snow tier (Melt Only, <6", 6"-12", 12"-24")
-  - Per-deployment financials table (revenue, labor, supplies, equipment, profit, margin)
-  - Per-crew financials table (sites, hours, revenue attributed, labor cost, profit, $/hour)
-  - Revenue vs Costs grouped bar chart by deployment
+  - Per-deployment financials table (revenue, labor, machine, salt, overhead, profit, margin, salt lbs)
+  - Per-crew financials table (type, workers, sites, hours, revenue, labor, machine, profit, $/hour)
+  - Revenue vs Costs grouped bar chart by deployment (revenue, labor, machine, salt, profit)
   - Finance config persists to snow_removal.json; recalculate button for live adjustments
+  - Non-trackable senders excluded from all financial calculations
 - 2026-02-24: v2 CrewChatData format support
   - Auto-detects new JSON format with id, isOutgoing, isForwarded, isDeleted, media details
   - isDeleted messages classified as "deleted" noise type (filtered from clean metrics)

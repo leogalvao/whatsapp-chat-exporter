@@ -1,0 +1,78 @@
+Act like a senior product manager + data modeler helping clarify requirements for a Replit (Python/TypeScript) app that models snow-removal operations and financials.
+
+Your goal is to transform the raw requirements below into a clear, unambiguous specification Replit can implement: business rules, data model, validations, and KPI math.
+
+Task (step-by-step):
+1) Restate the core entities and relationships:
+   - Location/Property
+   - Route (belongs to a Location; type = Sidewalk or ParkingLot)
+   - Crew (type = Sidewalk or ParkingLot)
+   - Deployment (a specific service event with a timestamp, snowfall band, service mode)
+   - DeploymentRoute (ordered list of routes within a deployment; sequence must be unique per deployment)
+2) Write strict business rules (as “MUST / MUST NOT”):
+   - Each crew MUST be assigned to exactly one type: Sidewalk OR ParkingLot, never both.
+   - Sidewalk crews’ time/cost MUST depend on crew size (# individuals) and property size.
+   - Parking-lot crews’ cost MUST assume at most 2 workers per crew (truck-based), regardless of actual individuals beyond 2.
+   - Location revenue MUST be fixed by snowfall amount/band (define as a lookup table per location).
+   - For each deployment, exactly ONE cost column/mode MUST be selected and applied to ALL routes in that deployment (no mixing):
+     examples: Pretreatment OR Snow&Ice 0–2" OR 2–6" OR 6–12" OR 12"+ (use the user’s actual bands).
+   - Within a deployment, the ordered sequence of routes MUST be unique (even if the same set of routes appears in another deployment).
+   - Routes in a deployment MAY vary (added/removed) compared to other deployments.
+3) Define the adjustable parameters (all user-configurable):
+   - Labor hourly rate(s) (by role/type if needed)
+   - Machine hourly rate(s) (by equipment class)
+   - Salt cost per pound
+   - Salt application pounds per route (or per acre/sqft) by service mode and snowfall band
+   - Sidewalk productivity factors (minutes per sqft, multiplier by crew size)
+   - Parking-lot productivity factors (minutes per acre/sqft, fixed crew size cap = 2)
+   - Overhead %, profit margin target, fuel/mobilization fee, minimum charge, etc.
+4) Specify exact cost formulas (no ambiguity):
+   - LaborCost = labor_hours * hourly_rate * workers_count_applied
+   - MachineCost = machine_hours * machine_hourly_rate
+   - MaterialCost = salt_lbs * salt_cost_per_lb
+   - TotalDeploymentCost = SUM over routes (LaborCost + MachineCost + MaterialCost) + optional mobilization/overhead
+   - Revenue = location_revenue_lookup(location_id, snowfall_band) OR per-deployment revenue if that’s the design
+   - Profit = Revenue - TotalDeploymentCost
+   - Margin% = Profit / Revenue (handle divide-by-zero)
+   Include how labor_hours and machine_hours are derived for:
+   - Sidewalk: based on property size and # individuals (productivity curve or multiplier)
+   - Parking lot: based on property size with workers_count_applied capped at 2
+5) List validations + error messages Replit should show:
+   - “Crew type cannot be both sidewalk and parking lot.”
+   - “Deployment must choose exactly one pricing/cost mode; mixing modes is not allowed.”
+   - “Duplicate route sequence detected for this deployment; reorder or change routes.”
+   - “Parking-lot crew worker count capped at 2 for costing.”
+6) Add financial KPIs (compute per route, per deployment, per location, and totals):
+   - Total Revenue, Total Cost, Profit, Margin %
+   - Cost per hour, Cost per route, Cost per sqft/acre
+   - Revenue per hour, Profit per hour
+   - Salt usage total (lbs) and cost, Salt lbs per sqft/acre
+   - Labor utilization %, Machine utilization % (if hours available provided)
+   - Breakeven snowfall band / breakeven revenue
+   - Scenario comparison: baseline vs adjusted parameters delta
+7) Output format MUST be:
+   A) “Clarified Requirements” (bullets)
+   B) “Data Model (Tables/Fields)” (structured list)
+   C) “Business Rules & Validations” (numbered MUST statements)
+   D) “Formulas” (explicit equations)
+   E) “KPIs” (definitions + formulas)
+   F) “Parameter List” (all adjustable knobs)
+   G) “Example” (one tiny example deployment showing the chosen cost mode, 2 routes, computed totals)
+
+Context (raw requirements to clarify, do not paraphrase away constraints):
+- Every crew is assigned to either do sidewalks or parking lot, never both.
+- The revenue for the locations are fixed, depending the amount of snow falls.
+- For every deployment, only 1 cost column is to be used; never mix columns within one deployment (pretreatment OR a specific snow&ice band like 6"-12", etc.). All routes in that deployment follow the same column.
+- For every deployment the routes may vary (added/removed). The deployment sequence of routes must be unique, even when the routes are the same.
+- Sidewalk crew time depends on number of individuals in the crew and the size of the property.
+- Parking-lot crew time is not impacted by individuals; cost should consider max 2 people per crew (truck).
+- Adjust the math for cost by hour, machine hours, number of workers, and pounds of salt.
+- Add more financial KPIs and allow fully adjustable parameters for scenario modeling.
+
+Constraints:
+- No code. No UI mockups. Only specification and formulas.
+- Avoid assumptions; if something is unknown, propose 2–3 safe options with labeled assumptions.
+- Keep it implementable: use consistent names, define units (hours, lbs, sqft/acre).
+- Length: 250–400 words.
+
+Take a deep breath and work on this problem step-by-step.

@@ -553,21 +553,28 @@ def _match_location_to_pricing(location, pricing_index):
 
 def _compute_financials(df, deployments_list, snow_config, pricing_index):
     finance_cfg = snow_config.get("finance_config", {})
-    labor_rate = finance_cfg.get("labor_rate_per_hour", 35.0)
-    supply_cost_per_site = finance_cfg.get("supply_cost_per_site", 15.0)
-    equipment_cost_per_deployment = finance_cfg.get("equipment_cost_per_deployment", 500.0)
+    labor_rate_sw = finance_cfg.get("labor_rate_sidewalk", 25.0)
+    labor_rate_pl = finance_cfg.get("labor_rate_parking", 30.0)
+    machine_rate = finance_cfg.get("machine_hourly_rate", 75.0)
+    salt_cost_lb = finance_cfg.get("salt_cost_per_lb", 0.15)
+    salt_lbs_sw = finance_cfg.get("salt_lbs_per_site_sidewalk", 50.0)
+    salt_lbs_pl = finance_cfg.get("salt_lbs_per_site_parking", 200.0)
+    workers_sw = finance_cfg.get("workers_sidewalk", 3)
+    workers_pl = finance_cfg.get("workers_parking", 2)
+    overhead_pct = finance_cfg.get("overhead_pct", 10.0)
     default_tier = finance_cfg.get("default_snow_tier", "price_under_6in")
     deployment_tiers = finance_cfg.get("deployment_snow_tiers", {})
 
+    empty_result = {
+        "deployment_financials": [], "crew_financials": [],
+        "total_revenue": 0, "total_costs": 0, "total_profit": 0,
+        "profit_margin": 0, "sites_serviced": 0, "sites_contracted": len(PRICING_DATA),
+        "avg_revenue_per_site": 0, "avg_cost_per_crew": 0,
+        "revenue_per_deployment": 0, "total_salt_lbs": 0,
+        "cost_per_hour": 0, "revenue_per_hour": 0, "profit_per_hour": 0,
+    }
     if df.empty or not deployments_list:
-        return {
-            "deployment_financials": [],
-            "crew_financials": [],
-            "total_revenue": 0, "total_costs": 0, "total_profit": 0,
-            "profit_margin": 0, "sites_serviced": 0, "sites_contracted": len(pricing_index) // 2,
-            "avg_revenue_per_site": 0, "avg_cost_per_crew": 0,
-            "revenue_per_deployment": 0,
-        }
+        return empty_result
 
     df_clean = df[df["noise_type"] == "clean"].copy()
     non_trackable = set(snow_config.get("non_trackable_senders", []))
@@ -578,7 +585,19 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
     crew_data = {}
     total_revenue = 0
     total_costs = 0
+    total_salt = 0
+    total_hours = 0
     all_serviced_locations = set()
+
+    chat_crew_type = {}
+    for chat in df_clean["chat"].unique():
+        _, is_sw, is_pl = _extract_crew_from_chat(chat)
+        if is_pl:
+            chat_crew_type[chat] = "Parking Lot"
+        elif is_sw:
+            chat_crew_type[chat] = "Sidewalk"
+        else:
+            chat_crew_type[chat] = "Sidewalk"
 
     for dep in deployments_list:
         label = dep["label"]
@@ -587,6 +606,8 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         tier = deployment_tiers.get(label, default_tier)
 
         dep_df = df_clean[(df_clean["msg_date"] >= start) & (df_clean["msg_date"] <= end + pd.Timedelta(days=1))]
+        if dep_df.empty:
+            continue
 
         dep_locations = dep_df[dep_df["location"].str.len() > 0]["location"].unique()
 
@@ -603,29 +624,73 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         dep_crews = dep_df[dep_df["sender_resolved"] != ""]["sender_resolved"].unique()
         n_crews = len(dep_crews)
 
+        dep_labor = 0
+        dep_machine = 0
+        dep_salt = 0
         dep_hours = 0
+        sw_sites = 0
+        pl_sites = 0
+
+        for loc in dep_locations:
+            loc_chats = dep_df[dep_df["location"] == loc]["chat"].unique()
+            for ch in loc_chats:
+                ct = chat_crew_type.get(ch, "Sidewalk")
+                if ct == "Parking Lot":
+                    pl_sites += 1
+                else:
+                    sw_sites += 1
+                break
+
+        dep_salt_lbs = (sw_sites * salt_lbs_sw) + (pl_sites * salt_lbs_pl)
+        dep_salt = dep_salt_lbs * salt_cost_lb
+
         for crew in dep_crews:
             crew_msgs = dep_df[dep_df["sender_resolved"] == crew]
-            if len(crew_msgs) >= 2:
-                time_range = crew_msgs["time"].dropna()
-                if len(time_range) >= 2:
-                    hrs = (time_range.max() - time_range.min()).total_seconds() / 3600
-                    dep_hours += hrs
+            if len(crew_msgs) < 2:
+                continue
+            time_range = crew_msgs["time"].dropna()
+            if len(time_range) < 2:
+                continue
+            hrs = (time_range.max() - time_range.min()).total_seconds() / 3600
+            dep_hours += hrs
 
-                    if crew not in crew_data:
-                        crew_data[crew] = {"hours": 0, "sites": 0, "revenue": 0, "deployments": 0}
-                    crew_data[crew]["hours"] += hrs
-                    crew_data[crew]["deployments"] += 1
+            crew_chats = crew_msgs["chat"].unique()
+            crew_type = "Sidewalk"
+            for ch in crew_chats:
+                if chat_crew_type.get(ch) == "Parking Lot":
+                    crew_type = "Parking Lot"
+                    break
+
+            if crew_type == "Parking Lot":
+                w = min(workers_pl, 2)
+                crew_labor = hrs * labor_rate_pl * w
+                crew_machine = hrs * machine_rate
+            else:
+                w = workers_sw
+                crew_labor = hrs * labor_rate_sw * w
+                crew_machine = 0
+
+            dep_labor += crew_labor
+            dep_machine += crew_machine
+
+            if crew not in crew_data:
+                crew_data[crew] = {"hours": 0, "sites": 0, "revenue": 0, "deployments": 0,
+                                   "labor_cost": 0, "machine_cost": 0, "salt_cost": 0,
+                                   "crew_type": crew_type, "workers": w}
+            crew_data[crew]["hours"] += hrs
+            crew_data[crew]["deployments"] += 1
+            crew_data[crew]["labor_cost"] += crew_labor
+            crew_data[crew]["machine_cost"] += crew_machine
 
         for crew in dep_crews:
             if crew in crew_data:
                 crew_data[crew]["sites"] += matched_sites / max(n_crews, 1)
                 crew_data[crew]["revenue"] += dep_revenue / max(n_crews, 1)
+                crew_data[crew]["salt_cost"] += dep_salt / max(n_crews, 1)
 
-        labor_cost = dep_hours * labor_rate
-        supply_cost = matched_sites * supply_cost_per_site
-        equip_cost = equipment_cost_per_deployment
-        dep_total_cost = labor_cost + supply_cost + equip_cost
+        direct_cost = dep_labor + dep_machine + dep_salt
+        dep_overhead = direct_cost * overhead_pct / 100
+        dep_total_cost = direct_cost + dep_overhead
         dep_profit = dep_revenue - dep_total_cost
         dep_margin = (dep_profit / dep_revenue * 100) if dep_revenue > 0 else 0
 
@@ -637,34 +702,42 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
             "crews": n_crews,
             "hours": round(dep_hours, 1),
             "revenue": round(dep_revenue, 2),
-            "labor_cost": round(labor_cost, 2),
-            "supply_cost": round(supply_cost, 2),
-            "equipment_cost": round(equip_cost, 2),
+            "labor_cost": round(dep_labor, 2),
+            "machine_cost": round(dep_machine, 2),
+            "material_cost": round(dep_salt, 2),
+            "overhead": round(dep_overhead, 2),
             "total_cost": round(dep_total_cost, 2),
             "profit": round(dep_profit, 2),
             "margin": round(dep_margin, 1),
+            "salt_lbs": round(dep_salt_lbs, 0),
         })
 
         total_revenue += dep_revenue
         total_costs += dep_total_cost
+        total_salt += dep_salt_lbs
+        total_hours += dep_hours
 
     crew_financials = []
     for crew, data in sorted(crew_data.items(), key=lambda x: x[1]["revenue"], reverse=True):
-        crew_cost = data["hours"] * labor_rate
-        crew_profit = data["revenue"] - crew_cost
+        crew_total_cost = data["labor_cost"] + data["machine_cost"] + data["salt_cost"]
+        crew_profit = data["revenue"] - crew_total_cost
         crew_financials.append({
             "crew": crew,
+            "type": data["crew_type"],
+            "workers": data["workers"],
             "deployments": data["deployments"],
             "sites": round(data["sites"], 1),
             "hours": round(data["hours"], 1),
             "revenue": round(data["revenue"], 2),
-            "labor_cost": round(crew_cost, 2),
+            "labor_cost": round(data["labor_cost"], 2),
+            "machine_cost": round(data["machine_cost"], 2),
+            "total_cost": round(crew_total_cost, 2),
             "profit": round(crew_profit, 2),
             "rate_per_hour": round(data["revenue"] / max(data["hours"], 0.1), 2),
         })
 
     total_profit = total_revenue - total_costs
-    n_deps = len(deployments_list)
+    n_deps = len([d for d in dep_financials])
     n_crews_total = len(crew_data)
 
     return {
@@ -679,6 +752,10 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         "avg_revenue_per_site": round(total_revenue / max(len(all_serviced_locations), 1), 2),
         "avg_cost_per_crew": round(total_costs / max(n_crews_total, 1), 2),
         "revenue_per_deployment": round(total_revenue / max(n_deps, 1), 2),
+        "total_salt_lbs": round(total_salt, 0),
+        "cost_per_hour": round(total_costs / max(total_hours, 0.1), 2),
+        "revenue_per_hour": round(total_revenue / max(total_hours, 0.1), 2),
+        "profit_per_hour": round(total_profit / max(total_hours, 0.1), 2),
     }
 
 
@@ -1243,59 +1320,105 @@ main_content = dbc.Tabs(
         dbc.Tab(label="Finances", tab_id="tab-finances", children=[
             html.Div([
                 html.H4("Financial Overview", className="mb-1"),
-                html.P("Revenue forecasting, cost analysis, and profit metrics based on contract pricing and operational data.",
+                html.P("Revenue forecasting and cost analysis with crew-type-aware costing (labor, machines, salt, overhead).",
                        className="text-muted mb-3", style={"fontSize": "14px"}),
             ], className="mt-3 mb-2 px-1"),
             dbc.Row([
                 dbc.Col(dbc.Card([dbc.CardBody([
-                    html.P("Total Revenue", className="text-muted mb-1", style={"fontSize": "12px"}),
-                    html.H4(id="fin-kpi-revenue", className="mb-0", style={"color": "#28a745"}),
-                ])], className="shadow-sm"), md=2),
+                    html.P("Total Revenue", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-revenue", className="mb-0", style={"color": "#28a745"}),
+                ])], className="shadow-sm"), md=3, lg=True),
                 dbc.Col(dbc.Card([dbc.CardBody([
-                    html.P("Total Costs", className="text-muted mb-1", style={"fontSize": "12px"}),
-                    html.H4(id="fin-kpi-costs", className="mb-0", style={"color": "#dc3545"}),
-                ])], className="shadow-sm"), md=2),
+                    html.P("Total Costs", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-costs", className="mb-0", style={"color": "#dc3545"}),
+                ])], className="shadow-sm"), md=3, lg=True),
                 dbc.Col(dbc.Card([dbc.CardBody([
-                    html.P("Profit", className="text-muted mb-1", style={"fontSize": "12px"}),
-                    html.H4(id="fin-kpi-profit", className="mb-0"),
-                ])], className="shadow-sm"), md=2),
+                    html.P("Profit", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-profit", className="mb-0"),
+                ])], className="shadow-sm"), md=3, lg=True),
                 dbc.Col(dbc.Card([dbc.CardBody([
-                    html.P("Profit Margin", className="text-muted mb-1", style={"fontSize": "12px"}),
-                    html.H4(id="fin-kpi-margin", className="mb-0"),
-                ])], className="shadow-sm"), md=2),
+                    html.P("Margin %", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-margin", className="mb-0"),
+                ])], className="shadow-sm"), md=3, lg=True),
                 dbc.Col(dbc.Card([dbc.CardBody([
-                    html.P("Sites Matched", className="text-muted mb-1", style={"fontSize": "12px"}),
-                    html.H4(id="fin-kpi-sites", className="mb-0"),
-                ])], className="shadow-sm"), md=2),
+                    html.P("Sites Matched", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-sites", className="mb-0"),
+                ])], className="shadow-sm"), md=3, lg=True),
                 dbc.Col(dbc.Card([dbc.CardBody([
-                    html.P("Rev / Deployment", className="text-muted mb-1", style={"fontSize": "12px"}),
-                    html.H4(id="fin-kpi-rev-dep", className="mb-0", style={"color": "#17a2b8"}),
-                ])], className="shadow-sm"), md=2),
-            ], className="mb-3"),
+                    html.P("Salt Used (lbs)", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-salt", className="mb-0", style={"color": "#6f42c1"}),
+                ])], className="shadow-sm"), md=3, lg=True),
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Cost / Hour", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-cost-hr", className="mb-0", style={"color": "#e83e8c"}),
+                ])], className="shadow-sm"), md=3, lg=True),
+                dbc.Col(dbc.Card([dbc.CardBody([
+                    html.P("Rev / Deployment", className="text-muted mb-1", style={"fontSize": "11px"}),
+                    html.H5(id="fin-kpi-rev-dep", className="mb-0", style={"color": "#17a2b8"}),
+                ])], className="shadow-sm"), md=3, lg=True),
+            ], className="mb-3 g-2"),
             html.H5("Cost Configuration", className="mt-3 mb-2"),
-            html.P("Adjust labor, supply, and equipment costs. Changes are saved and applied to forecasts.",
+            html.P("Separate rates for sidewalk and parking lot crews. Parking lot workers capped at 2 (truck-based).",
                    className="text-muted mb-2", style={"fontSize": "13px"}),
             dbc.Row([
                 dbc.Col([
-                    dbc.Label("Labor Rate ($/hour)", className="mb-1"),
-                    dbc.Input(id="fin-labor-rate", type="number",
-                              value=SNOW_CONFIG.get("finance_config", {}).get("labor_rate_per_hour", 35.0),
-                              min=0, step=0.5, style={"maxWidth": "180px"}),
-                ], md=2),
+                    dbc.Label("Sidewalk Labor ($/hr)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-labor-sw", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("labor_rate_sidewalk", 25.0),
+                              min=0, step=0.5, size="sm"),
+                ], md=2, lg=True),
                 dbc.Col([
-                    dbc.Label("Supply Cost ($/site)", className="mb-1"),
-                    dbc.Input(id="fin-supply-cost", type="number",
-                              value=SNOW_CONFIG.get("finance_config", {}).get("supply_cost_per_site", 15.0),
-                              min=0, step=0.5, style={"maxWidth": "180px"}),
-                ], md=2),
+                    dbc.Label("Parking Labor ($/hr)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-labor-pl", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("labor_rate_parking", 30.0),
+                              min=0, step=0.5, size="sm"),
+                ], md=2, lg=True),
                 dbc.Col([
-                    dbc.Label("Equipment ($/deployment)", className="mb-1"),
-                    dbc.Input(id="fin-equip-cost", type="number",
-                              value=SNOW_CONFIG.get("finance_config", {}).get("equipment_cost_per_deployment", 500.0),
-                              min=0, step=10, style={"maxWidth": "180px"}),
-                ], md=2),
+                    dbc.Label("Machine ($/hr)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-machine-rate", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("machine_hourly_rate", 75.0),
+                              min=0, step=1, size="sm"),
+                ], md=2, lg=True),
                 dbc.Col([
-                    dbc.Label("Default Snow Tier", className="mb-1"),
+                    dbc.Label("Salt ($/lb)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-salt-cost", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("salt_cost_per_lb", 0.15),
+                              min=0, step=0.01, size="sm"),
+                ], md=2, lg=True),
+                dbc.Col([
+                    dbc.Label("Salt lbs/site (SW)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-salt-sw", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("salt_lbs_per_site_sidewalk", 50.0),
+                              min=0, step=5, size="sm"),
+                ], md=2, lg=True),
+                dbc.Col([
+                    dbc.Label("Salt lbs/site (PL)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-salt-pl", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("salt_lbs_per_site_parking", 200.0),
+                              min=0, step=10, size="sm"),
+                ], md=2, lg=True),
+            ], className="mb-2 g-2"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Workers (Sidewalk)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-workers-sw", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("workers_sidewalk", 3),
+                              min=1, max=10, step=1, size="sm"),
+                ], md=2, lg=True),
+                dbc.Col([
+                    dbc.Label("Workers (Parking)", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-workers-pl", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("workers_parking", 2),
+                              min=1, max=2, step=1, size="sm"),
+                ], md=2, lg=True),
+                dbc.Col([
+                    dbc.Label("Overhead %", className="mb-1", style={"fontSize": "12px"}),
+                    dbc.Input(id="fin-overhead", type="number",
+                              value=SNOW_CONFIG.get("finance_config", {}).get("overhead_pct", 10.0),
+                              min=0, max=100, step=0.5, size="sm"),
+                ], md=2, lg=True),
+                dbc.Col([
+                    dbc.Label("Default Snow Tier", className="mb-1", style={"fontSize": "12px"}),
                     dcc.Dropdown(
                         id="fin-default-tier",
                         options=[
@@ -1306,17 +1429,16 @@ main_content = dbc.Tabs(
                         ],
                         value=SNOW_CONFIG.get("finance_config", {}).get("default_snow_tier", "price_under_6in"),
                         clearable=False,
-                        style={"maxWidth": "200px"},
                     ),
-                ], md=2),
+                ], md=2, lg=True),
                 dbc.Col([
                     dbc.Button("Recalculate", id="fin-recalc-btn", color="primary",
-                               className="mt-4", n_clicks=0),
-                    dbc.Button("Save Costs", id="fin-save-btn", color="success",
-                               className="mt-4 ms-2", n_clicks=0),
-                    html.Span(id="fin-save-status", className="ms-2 align-middle mt-4"),
-                ], md=4),
-            ], className="mb-3"),
+                               size="sm", className="mt-4 me-1", n_clicks=0),
+                    dbc.Button("Save", id="fin-save-btn", color="success",
+                               size="sm", className="mt-4", n_clicks=0),
+                    html.Span(id="fin-save-status", className="ms-2 align-middle"),
+                ], md=2, lg=True),
+            ], className="mb-3 g-2"),
             html.Hr(className="my-3"),
             html.H5("Deployment Financials", className="mb-2"),
             html.Div(id="fin-deployment-table-container"),
@@ -4826,26 +4948,42 @@ def _empty_fig(title):
     Output("fin-kpi-margin", "children"),
     Output("fin-kpi-margin", "style"),
     Output("fin-kpi-sites", "children"),
+    Output("fin-kpi-salt", "children"),
+    Output("fin-kpi-cost-hr", "children"),
     Output("fin-kpi-rev-dep", "children"),
     Output("fin-deployment-table-container", "children"),
     Output("fin-crew-table-container", "children"),
     Output("fin-chart-revenue", "figure"),
     Input("main-tabs", "active_tab"),
     Input("fin-recalc-btn", "n_clicks"),
-    State("fin-labor-rate", "value"),
-    State("fin-supply-cost", "value"),
-    State("fin-equip-cost", "value"),
+    State("fin-labor-sw", "value"),
+    State("fin-labor-pl", "value"),
+    State("fin-machine-rate", "value"),
+    State("fin-salt-cost", "value"),
+    State("fin-salt-sw", "value"),
+    State("fin-salt-pl", "value"),
+    State("fin-workers-sw", "value"),
+    State("fin-workers-pl", "value"),
+    State("fin-overhead", "value"),
     State("fin-default-tier", "value"),
 )
-def update_finances(active_tab, n_clicks, labor_rate, supply_cost, equip_cost, default_tier):
+def update_finances(active_tab, n_clicks, labor_sw, labor_pl, machine_rate,
+                    salt_cost, salt_sw, salt_pl, workers_sw, workers_pl,
+                    overhead, default_tier):
     if active_tab != "tab-finances":
         raise PreventUpdate
     try:
         temp_config = dict(SNOW_CONFIG)
         temp_config["finance_config"] = {
-            "labor_rate_per_hour": labor_rate or 35.0,
-            "supply_cost_per_site": supply_cost or 15.0,
-            "equipment_cost_per_deployment": equip_cost or 500.0,
+            "labor_rate_sidewalk": labor_sw or 25.0,
+            "labor_rate_parking": labor_pl or 30.0,
+            "machine_hourly_rate": machine_rate or 75.0,
+            "salt_cost_per_lb": salt_cost or 0.15,
+            "salt_lbs_per_site_sidewalk": salt_sw or 50.0,
+            "salt_lbs_per_site_parking": salt_pl or 200.0,
+            "workers_sidewalk": workers_sw or 3,
+            "workers_parking": min(workers_pl or 2, 2),
+            "overhead_pct": overhead or 10.0,
             "default_snow_tier": default_tier or "price_under_6in",
             "deployment_snow_tiers": SNOW_CONFIG.get("finance_config", {}).get("deployment_snow_tiers", {}),
         }
@@ -4859,27 +4997,31 @@ def update_finances(active_tab, n_clicks, labor_rate, supply_cost, equip_cost, d
         margin_str = f"{fin['profit_margin']:.1f}%"
         margin_color = "#28a745" if fin['profit_margin'] >= 0 else "#dc3545"
         sites_str = f"{fin['sites_serviced']} / {fin['sites_contracted']}"
+        salt_str = f"{fin['total_salt_lbs']:,.0f}"
+        cost_hr_str = f"${fin['cost_per_hour']:,.0f}"
         rev_dep_str = f"${fin['revenue_per_deployment']:,.0f}"
 
         dep_table = dash_table.DataTable(
             columns=[
                 {"name": "Deployment", "id": "deployment"},
-                {"name": "Snow Tier", "id": "snow_tier"},
+                {"name": "Tier", "id": "snow_tier"},
                 {"name": "Sites", "id": "sites_serviced", "type": "numeric"},
                 {"name": "Crews", "id": "crews", "type": "numeric"},
                 {"name": "Hours", "id": "hours", "type": "numeric"},
                 {"name": "Revenue", "id": "revenue", "type": "numeric"},
                 {"name": "Labor", "id": "labor_cost", "type": "numeric"},
-                {"name": "Supplies", "id": "supply_cost", "type": "numeric"},
-                {"name": "Equipment", "id": "equipment_cost", "type": "numeric"},
+                {"name": "Machine", "id": "machine_cost", "type": "numeric"},
+                {"name": "Salt", "id": "material_cost", "type": "numeric"},
+                {"name": "Overhead", "id": "overhead", "type": "numeric"},
                 {"name": "Total Cost", "id": "total_cost", "type": "numeric"},
                 {"name": "Profit", "id": "profit", "type": "numeric"},
                 {"name": "Margin %", "id": "margin", "type": "numeric"},
+                {"name": "Salt (lbs)", "id": "salt_lbs", "type": "numeric"},
             ],
             data=fin["deployment_financials"],
             style_table={"overflowX": "auto"},
-            style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
-            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5"},
+            style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
+            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px"},
             style_data_conditional=[
                 {"if": {"filter_query": "{profit} < 0"}, "color": "#dc3545", "fontWeight": "bold"},
                 {"if": {"filter_query": "{margin} >= 20"}, "color": "#28a745"},
@@ -4890,18 +5032,22 @@ def update_finances(active_tab, n_clicks, labor_rate, supply_cost, equip_cost, d
         crew_table = dash_table.DataTable(
             columns=[
                 {"name": "Crew", "id": "crew"},
-                {"name": "Deployments", "id": "deployments", "type": "numeric"},
+                {"name": "Type", "id": "type"},
+                {"name": "Workers", "id": "workers", "type": "numeric"},
+                {"name": "Deps", "id": "deployments", "type": "numeric"},
                 {"name": "Sites", "id": "sites", "type": "numeric"},
                 {"name": "Hours", "id": "hours", "type": "numeric"},
                 {"name": "Revenue", "id": "revenue", "type": "numeric"},
-                {"name": "Labor Cost", "id": "labor_cost", "type": "numeric"},
+                {"name": "Labor", "id": "labor_cost", "type": "numeric"},
+                {"name": "Machine", "id": "machine_cost", "type": "numeric"},
+                {"name": "Total Cost", "id": "total_cost", "type": "numeric"},
                 {"name": "Profit", "id": "profit", "type": "numeric"},
                 {"name": "$/Hour", "id": "rate_per_hour", "type": "numeric"},
             ],
             data=fin["crew_financials"],
             style_table={"overflowX": "auto"},
-            style_cell={"textAlign": "left", "padding": "8px", "fontSize": "13px"},
-            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5"},
+            style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
+            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px"},
             style_data_conditional=[
                 {"if": {"filter_query": "{profit} < 0"}, "color": "#dc3545"},
             ],
@@ -4909,13 +5055,17 @@ def update_finances(active_tab, n_clicks, labor_rate, supply_cost, equip_cost, d
         ) if fin["crew_financials"] else html.P("No crew financial data available.", className="text-muted")
 
         if fin["deployment_financials"]:
-            dep_df = pd.DataFrame(fin["deployment_financials"])
+            dep_df_chart = pd.DataFrame(fin["deployment_financials"])
             fig = go.Figure()
-            fig.add_trace(go.Bar(name="Revenue", x=dep_df["deployment"], y=dep_df["revenue"],
+            fig.add_trace(go.Bar(name="Revenue", x=dep_df_chart["deployment"], y=dep_df_chart["revenue"],
                                 marker_color="#28a745"))
-            fig.add_trace(go.Bar(name="Total Cost", x=dep_df["deployment"], y=dep_df["total_cost"],
-                                marker_color="#dc3545"))
-            fig.add_trace(go.Bar(name="Profit", x=dep_df["deployment"], y=dep_df["profit"],
+            fig.add_trace(go.Bar(name="Labor", x=dep_df_chart["deployment"], y=dep_df_chart["labor_cost"],
+                                marker_color="#fd7e14"))
+            fig.add_trace(go.Bar(name="Machine", x=dep_df_chart["deployment"], y=dep_df_chart["machine_cost"],
+                                marker_color="#6f42c1"))
+            fig.add_trace(go.Bar(name="Salt", x=dep_df_chart["deployment"], y=dep_df_chart["material_cost"],
+                                marker_color="#20c997"))
+            fig.add_trace(go.Bar(name="Profit", x=dep_df_chart["deployment"], y=dep_df_chart["profit"],
                                 marker_color="#17a2b8"))
             fig.update_layout(barmode="group", template="plotly_white",
                             margin=dict(l=40, r=20, t=30, b=40),
@@ -4929,14 +5079,14 @@ def update_finances(active_tab, n_clicks, labor_rate, supply_cost, equip_cost, d
 
         return (rev_str, cost_str, profit_str, {"color": profit_color},
                 margin_str, {"color": margin_color},
-                sites_str, rev_dep_str,
+                sites_str, salt_str, cost_hr_str, rev_dep_str,
                 dep_table, crew_table, fig)
     except Exception as e:
         print(f"[Finances] Error: {e}")
         import traceback; traceback.print_exc()
         empty_fig = go.Figure()
         empty_fig.update_layout(template="plotly_white")
-        return ("$0", "$0", "$0", {}, "0%", {}, "0 / 0", "$0",
+        return ("$0", "$0", "$0", {}, "0%", {}, "0 / 0", "0", "$0", "$0",
                 html.P("Error computing financials.", className="text-muted"),
                 html.P("Error computing financials.", className="text-muted"),
                 empty_fig)
@@ -4945,22 +5095,36 @@ def update_finances(active_tab, n_clicks, labor_rate, supply_cost, equip_cost, d
 @app.callback(
     Output("fin-save-status", "children"),
     Input("fin-save-btn", "n_clicks"),
-    State("fin-labor-rate", "value"),
-    State("fin-supply-cost", "value"),
-    State("fin-equip-cost", "value"),
+    State("fin-labor-sw", "value"),
+    State("fin-labor-pl", "value"),
+    State("fin-machine-rate", "value"),
+    State("fin-salt-cost", "value"),
+    State("fin-salt-sw", "value"),
+    State("fin-salt-pl", "value"),
+    State("fin-workers-sw", "value"),
+    State("fin-workers-pl", "value"),
+    State("fin-overhead", "value"),
     State("fin-default-tier", "value"),
     prevent_initial_call=True,
 )
-def save_finance_config(n_clicks, labor_rate, supply_cost, equip_cost, default_tier):
+def save_finance_config(n_clicks, labor_sw, labor_pl, machine_rate,
+                        salt_cost, salt_sw, salt_pl, workers_sw, workers_pl,
+                        overhead, default_tier):
     if not n_clicks:
         raise PreventUpdate
     try:
         config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
         config = load_config(config_path)
         config["finance_config"] = {
-            "labor_rate_per_hour": labor_rate or 35.0,
-            "supply_cost_per_site": supply_cost or 15.0,
-            "equipment_cost_per_deployment": equip_cost or 500.0,
+            "labor_rate_sidewalk": labor_sw or 25.0,
+            "labor_rate_parking": labor_pl or 30.0,
+            "machine_hourly_rate": machine_rate or 75.0,
+            "salt_cost_per_lb": salt_cost or 0.15,
+            "salt_lbs_per_site_sidewalk": salt_sw or 50.0,
+            "salt_lbs_per_site_parking": salt_pl or 200.0,
+            "workers_sidewalk": workers_sw or 3,
+            "workers_parking": min(workers_pl or 2, 2),
+            "overhead_pct": overhead or 10.0,
             "default_snow_tier": default_tier or "price_under_6in",
             "deployment_snow_tiers": config.get("finance_config", {}).get("deployment_snow_tiers", {}),
         }
