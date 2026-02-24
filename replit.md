@@ -30,7 +30,8 @@ Key dashboard features include:
 - Billable route model: DeploymentID + LocationID + ServiceArea combinations (not just unique addresses).
 - Detection of idle time and recall events.
 - Automatic location type inference and trackable sender filtering.
-- Deployment burn-down charts scaled by crew size.
+- Deployment burn-down charts scaled by crew size, with elapsed-hours overlay for cross-deployment comparison.
+- Deployment time windows: configurable start/end date+time per deployment (Settings tab), stored in `deployment_time_windows` config; controls which messages belong to each deployment.
 - Per-deployment overrides for crew sizes (SW/PL workers) and total route count (single field matching invoice format), saved to config.
 - Map marker clustering (per-crew, auto-clusters at lower zoom levels).
 - Crew merging capabilities for consistent tracking.

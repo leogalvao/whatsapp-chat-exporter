@@ -1080,15 +1080,91 @@ def _compute_deployments(dates, gap_hours=24):
 
 ALL_DEPLOYMENTS_LIST = _compute_deployments(ALL_DATES)
 
-_date_to_deployment = {}
-for _dep in ALL_DEPLOYMENTS_LIST:
-    _d = _dep["start_date"]
-    while _d <= _dep["end_date"]:
-        _date_to_deployment[_d] = _dep["label"]
-        _d += timedelta(days=1)
+_saved_tw = SNOW_CONFIG.get("deployment_time_windows", {})
 
-DF_ALL["deployment"] = DF_ALL["msg_date"].dt.date.map(_date_to_deployment)
+
+def _parse_tw_datetime(s, year=None):
+    """Parse 'MM/DD HH:MM AM' or 'MM/DD HH:MM PM' into a datetime."""
+    if not s or not s.strip():
+        return None
+    s = s.strip()
+    for fmt in ("%m/%d %I:%M %p", "%m/%d %I:%M%p", "%m/%d %H:%M"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if year:
+                dt = dt.replace(year=year)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _apply_deployment_assignment():
+    """Assign messages to deployments using time windows when available,
+    falling back to date-based mapping."""
+    global _date_to_deployment
+    tw = SNOW_CONFIG.get("deployment_time_windows", {})
+    tw_ranges = []
+    for dep in ALL_DEPLOYMENTS_LIST:
+        label = dep["label"]
+        if label in tw and tw[label].get("start") and tw[label].get("end"):
+            yr = dep["start_date"].year
+            start_dt = _parse_tw_datetime(tw[label]["start"], year=yr)
+            end_dt = _parse_tw_datetime(tw[label]["end"], year=yr)
+            if end_dt and end_dt.month < dep["start_date"].month:
+                end_dt = end_dt.replace(year=yr + 1)
+            if start_dt and end_dt:
+                tw_ranges.append((label, start_dt, end_dt))
+                dep["tw_start"] = start_dt
+                dep["tw_end"] = end_dt
+                continue
+        dep.pop("tw_start", None)
+        dep.pop("tw_end", None)
+
+    _date_to_deployment = {}
+    for dep in ALL_DEPLOYMENTS_LIST:
+        _d = dep["start_date"]
+        while _d <= dep["end_date"]:
+            _date_to_deployment[_d] = dep["label"]
+            _d += timedelta(days=1)
+
+    if tw_ranges:
+        def _assign_tw(row):
+            ts = row.get("msg_date")
+            if pd.isna(ts):
+                return None
+            for label, start_dt, end_dt in tw_ranges:
+                if start_dt <= ts <= end_dt:
+                    return label
+            d = ts.date() if hasattr(ts, "date") else ts
+            return _date_to_deployment.get(d)
+        DF_ALL["deployment"] = DF_ALL.apply(_assign_tw, axis=1)
+    else:
+        DF_ALL["deployment"] = DF_ALL["msg_date"].dt.date.map(_date_to_deployment)
+
+
+_apply_deployment_assignment()
 ALL_DEPLOYMENTS = [dep["label"] for dep in ALL_DEPLOYMENTS_LIST]
+
+
+def _build_deployment_tw_table_data():
+    """Build table rows for the deployment time windows editor."""
+    tw = SNOW_CONFIG.get("deployment_time_windows", {})
+    rows = []
+    for dep in ALL_DEPLOYMENTS_LIST:
+        label = dep["label"]
+        saved = tw.get(label, {})
+        if saved.get("start"):
+            start_str = saved["start"]
+        else:
+            start_str = f"{dep['start_date'].strftime('%m/%d')} 05:00 AM"
+        if saved.get("end"):
+            end_str = saved["end"]
+        else:
+            end_str = f"{dep['end_date'].strftime('%m/%d')} 11:59 PM"
+        rows.append({"label": label, "start": start_str, "end": end_str})
+    return rows
+
 
 # Stats
 TOTAL_MSGS = len(DF_ALL)
@@ -1932,6 +2008,39 @@ main_content = dbc.Tabs(
                         ], md=4),
                     ]),
                 ], md=6),
+            ]),
+            html.Hr(className="my-3"),
+            dbc.Row([
+                dbc.Col([
+                    html.H5("Deployment Time Windows", className="mb-2"),
+                    html.P("Set the exact start and end date/time for each deployment. "
+                           "Format: MM/DD HH:MM AM/PM (e.g. 02/21 05:00 AM). "
+                           "Messages outside these windows are unassigned. "
+                           "Leave blank to use auto-detection.",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    html.Div(
+                        dash_table.DataTable(
+                            id="deployment-time-windows-table",
+                            columns=[
+                                {"name": "Deployment", "id": "label", "editable": False},
+                                {"name": "Start (MM/DD HH:MM AM/PM)", "id": "start", "editable": True},
+                                {"name": "End (MM/DD HH:MM AM/PM)", "id": "end", "editable": True},
+                            ],
+                            data=_build_deployment_tw_table_data(),
+                            style_table={"overflowX": "auto"},
+                            style_cell={"textAlign": "left", "padding": "6px", "fontSize": "13px"},
+                            style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5"},
+                            style_data_conditional=[
+                                {"if": {"column_id": "label"}, "backgroundColor": "#f8f9fa", "fontWeight": "bold"},
+                            ],
+                            editable=True,
+                        ),
+                        className="mt-2",
+                    ),
+                    dbc.Button("Save Time Windows", id="deployment-tw-save-btn", color="primary",
+                               className="mt-2 me-2", n_clicks=0),
+                    html.Span(id="deployment-tw-save-status", className="ms-2 align-middle"),
+                ], md=12),
             ]),
             html.Hr(className="my-3"),
             dbc.Row([
@@ -5032,6 +5141,63 @@ def save_settings(n_clicks, crew_values, crew_ids, track_values, track_ids,
         with open(config_path, "w") as f:
             json.dump(SNOW_CONFIG, f, indent=2)
         return html.Span("Settings saved!", style={"color": "green", "fontWeight": "bold"})
+    except Exception as e:
+        return html.Span(f"Error saving: {e}", style={"color": "red"})
+
+
+# ── Deployment Time Windows Callback ─────────────────────────────────────────
+
+@app.callback(
+    Output("deployment-tw-save-status", "children"),
+    Input("deployment-tw-save-btn", "n_clicks"),
+    State("deployment-time-windows-table", "data"),
+    prevent_initial_call=True,
+)
+def save_deployment_time_windows(n_clicks, table_data):
+    global SNOW_CONFIG
+    if not n_clicks or not table_data:
+        raise PreventUpdate
+
+    tw = {}
+    errors = []
+    for row in table_data:
+        label = row.get("label", "")
+        start_str = (row.get("start") or "").strip()
+        end_str = (row.get("end") or "").strip()
+        if not start_str and not end_str:
+            continue
+        dep_match = [d for d in ALL_DEPLOYMENTS_LIST if d["label"] == label]
+        yr = dep_match[0]["start_date"].year if dep_match else datetime.now().year
+        start_dt = _parse_tw_datetime(start_str, year=yr) if start_str else None
+        end_dt = _parse_tw_datetime(end_str, year=yr) if end_str else None
+        if start_str and not start_dt:
+            errors.append(f"{label}: invalid start format '{start_str}'")
+        if end_str and not end_dt:
+            errors.append(f"{label}: invalid end format '{end_str}'")
+        if start_dt and end_dt and start_dt >= end_dt:
+            errors.append(f"{label}: start must be before end")
+        if not errors:
+            tw[label] = {"start": start_str, "end": end_str}
+
+    if errors:
+        return html.Span(
+            f"Errors: {'; '.join(errors)}",
+            style={"color": "red", "fontSize": "13px"},
+        )
+
+    SNOW_CONFIG["deployment_time_windows"] = tw
+    _apply_deployment_assignment()
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(SNOW_CONFIG, f, indent=2)
+        n_configured = len(tw)
+        return html.Span(
+            f"Saved! {n_configured} deployment time window(s) configured. Reload page to apply fully.",
+            style={"color": "green", "fontWeight": "bold", "fontSize": "13px"},
+        )
     except Exception as e:
         return html.Span(f"Error saving: {e}", style={"color": "red"})
 
