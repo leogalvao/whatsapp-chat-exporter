@@ -16,10 +16,10 @@ The web dashboard is organized into 9 main tabs:
 - **Overview**: Message volume, activity heatmaps, daily timelines.
 - **Productivity**: Daily scores, crew leaderboard, idle time detection.
 - **Crew Analysis**: Per-sender metrics, message gaps, route timelines.
-- **Deployments**: Summary, timeline, cross-deployment comparison, downloadable HTML reports, breakdown with crew-location reassignment.
-- **Operations**: Routing Gantt chart, deployment burn-down, traffic analysis, recall detection.
+- **Deployments**: Summary, timeline, cross-deployment comparison, downloadable HTML reports, breakdown with crew-location reassignment, per-deployment overrides (crew sizes, route counts).
+- **Operations**: Routing Gantt chart, deployment burn-down (supports route overrides), traffic analysis, recall detection.
 - **Finances**: Revenue forecasting, cost analysis, profit metrics, invoice reconciliation.
-- **Map**: DC Service Map with OpenStreetMap tiles, location color-coding by crew, deployment filtering.
+- **Map**: DC Service Map with OpenStreetMap tiles, location color-coding by crew, deployment filtering, marker clustering.
 - **Data Quality**: Noise filtering, raw message data.
 - **Settings**: Crew assignment configuration, sender management, expected hours, service times, location registry upload, invoice upload.
 
@@ -31,6 +31,8 @@ Key dashboard features include:
 - Detection of idle time and recall events.
 - Automatic location type inference and trackable sender filtering.
 - Deployment burn-down charts scaled by crew size.
+- Per-deployment overrides for crew sizes (SW/PL workers) and route counts, saved to config.
+- Map marker clustering (per-crew, auto-clusters at lower zoom levels).
 - Crew merging capabilities for consistent tracking.
 - Drag-and-drop file upload for various data formats.
 - Distance-based travel efficiency analysis.

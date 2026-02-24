@@ -813,6 +813,13 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
                     else:
                         sw_sites += 1
 
+        dep_overrides = snow_config.get("deployment_overrides", {}).get(label, {})
+        ov_sw = dep_overrides.get("sw_routes")
+        ov_pl = dep_overrides.get("pl_routes")
+        if ov_sw is not None:
+            sw_sites = ov_sw
+        if ov_pl is not None:
+            pl_sites = ov_pl
         billable_site_count = sw_sites + pl_sites
         dep_salt_lbs = (sw_sites * salt_lbs_sw) + (pl_sites * salt_lbs_pl)
         dep_salt = dep_salt_lbs * salt_cost_lb
@@ -842,16 +849,28 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
             ov_workers = override.get("workers")
             ov_hours = override.get("hours")
 
-            actual_hrs = ov_hours if ov_hours else hrs
+            actual_hrs = ov_hours if ov_hours is not None else hrs
 
             if crew_type == "Parking Lot":
-                w = ov_workers if ov_workers else min(workers_pl, 2)
-                rate = ov_rate if ov_rate else labor_rate_pl
+                dep_w_pl = dep_overrides.get("workers_pl")
+                if ov_workers is not None:
+                    w = ov_workers
+                elif dep_w_pl is not None:
+                    w = dep_w_pl
+                else:
+                    w = min(workers_pl, 2)
+                rate = ov_rate if ov_rate is not None else labor_rate_pl
                 crew_labor = actual_hrs * rate * w
                 crew_machine = actual_hrs * machine_rate
             else:
-                w = ov_workers if ov_workers else workers_sw
-                rate = ov_rate if ov_rate else labor_rate_sw
+                dep_w_sw = dep_overrides.get("workers_sw")
+                if ov_workers is not None:
+                    w = ov_workers
+                elif dep_w_sw is not None:
+                    w = dep_w_sw
+                else:
+                    w = workers_sw
+                rate = ov_rate if ov_rate is not None else labor_rate_sw
                 crew_labor = actual_hrs * rate * w
                 crew_machine = 0
 
@@ -1503,6 +1522,14 @@ main_content = dbc.Tabs(
                 ], md=4),
             ], className="mb-3"),
             html.Div(id="dep-breakdown-table-container"),
+            html.Hr(className="my-3"),
+            html.H5("Deployment Overrides", className="mb-2"),
+            html.P("Adjust crew sizes and route counts per deployment. Changes affect burndown and financial calculations.",
+                   className="text-muted mb-2", style={"fontSize": "13px"}),
+            html.Div(id="dep-overrides-table-container"),
+            dbc.Button("Save & Recalculate", id="dep-save-overrides-btn", color="success",
+                       size="sm", className="mt-2 mb-3", n_clicks=0),
+            html.Span(id="dep-overrides-status", className="ms-2"),
         ]),
         dbc.Tab(label="Operations", tab_id="tab-operations", children=[
             html.Div([
@@ -5431,6 +5458,129 @@ def save_deployment_crew_assignments(n_clicks, table_data):
         return html.Span(f"Error: {e}", style={"color": "red"})
 
 
+# ── Deployment Overrides Callback ────────────────────────────────────────────
+
+@app.callback(
+    Output("dep-overrides-table-container", "children"),
+    Input("main-tabs", "active_tab"),
+    Input("dep-overrides-status", "children"),
+)
+def render_deployment_overrides(active_tab, _trigger):
+    if active_tab != "tab-deployments":
+        raise PreventUpdate
+
+    if not ALL_DEPLOYMENTS_LIST:
+        return html.P("No deployments available.", className="text-muted", style={"fontSize": "13px"})
+
+    overrides = SNOW_CONFIG.get("deployment_overrides", {})
+    finance_cfg = SNOW_CONFIG.get("finance_config", {})
+    default_workers_sw = finance_cfg.get("workers_sidewalk", 3)
+    default_workers_pl = finance_cfg.get("workers_parking", 2)
+
+    rows_data = []
+    for dep in ALL_DEPLOYMENTS_LIST:
+        label = dep["label"]
+        dep_ov = overrides.get(label, {})
+
+        dep_df = DF_ALL[(DF_ALL["deployment"] == label) & (DF_ALL["noise_type"] == "clean")] if not DF_ALL.empty else pd.DataFrame()
+        non_trackable = set(SNOW_CONFIG.get("non_trackable_senders", []))
+        if not dep_df.empty and non_trackable:
+            dep_df = dep_df[~dep_df["sender_resolved"].isin(non_trackable)]
+
+        auto_sw = 0
+        auto_pl = 0
+        if not dep_df.empty:
+            for loc in dep_df[dep_df["location"].str.len() > 0]["location"].unique():
+                loc_chats = dep_df[dep_df["location"] == loc]["chat"].unique()
+                sas = set()
+                for ch in loc_chats:
+                    _, is_sw, is_pl_flag = _extract_crew_from_chat(ch)
+                    if is_pl_flag:
+                        sas.add("Parking Lot")
+                    else:
+                        sas.add("Sidewalk")
+                for sa in sas:
+                    if sa == "Parking Lot":
+                        auto_pl += 1
+                    else:
+                        auto_sw += 1
+
+        crews_active = dep_df["chat"].nunique() if not dep_df.empty else 0
+
+        rows_data.append({
+            "deployment": label,
+            "crews_detected": crews_active,
+            "workers_sw": dep_ov.get("workers_sw", ""),
+            "workers_pl": dep_ov.get("workers_pl", ""),
+            "auto_sw_routes": auto_sw,
+            "sw_routes": dep_ov.get("sw_routes", ""),
+            "auto_pl_routes": auto_pl,
+            "pl_routes": dep_ov.get("pl_routes", ""),
+        })
+
+    return dash_table.DataTable(
+        id="dep-overrides-table",
+        columns=[
+            {"name": "Deployment", "id": "deployment"},
+            {"name": "Crews Detected", "id": "crews_detected"},
+            {"name": "SW Workers", "id": "workers_sw", "type": "numeric", "editable": True},
+            {"name": "PL Workers", "id": "workers_pl", "type": "numeric", "editable": True},
+            {"name": "Auto SW Routes", "id": "auto_sw_routes"},
+            {"name": "SW Routes Override", "id": "sw_routes", "type": "numeric", "editable": True},
+            {"name": "Auto PL Routes", "id": "auto_pl_routes"},
+            {"name": "PL Routes Override", "id": "pl_routes", "type": "numeric", "editable": True},
+        ],
+        data=rows_data,
+        editable=True,
+        style_table={"overflowX": "auto", "maxHeight": "400px", "overflowY": "auto"},
+        style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
+        style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px",
+                      "position": "sticky", "top": 0},
+        style_data_conditional=[
+            {"if": {"column_editable": True}, "backgroundColor": "#fffde7"},
+        ],
+        page_size=50,
+    )
+
+
+@app.callback(
+    Output("dep-overrides-status", "children"),
+    Input("dep-save-overrides-btn", "n_clicks"),
+    State("dep-overrides-table", "data"),
+    prevent_initial_call=True,
+)
+def save_deployment_overrides(n_clicks, table_data):
+    global SNOW_CONFIG
+    if not n_clicks or not table_data:
+        raise PreventUpdate
+
+    deployment_overrides = {}
+    for row in table_data:
+        dep = row.get("deployment", "")
+        if not dep:
+            continue
+        ov = {}
+        for key in ["workers_sw", "workers_pl", "sw_routes", "pl_routes"]:
+            val = row.get(key)
+            if val is not None and val != "":
+                try:
+                    ov[key] = int(float(val))
+                except (ValueError, TypeError):
+                    pass
+        if ov:
+            deployment_overrides[dep] = ov
+
+    SNOW_CONFIG["deployment_overrides"] = deployment_overrides
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+        return html.Span("Overrides saved! Recalculating...", style={"color": "green"})
+    except Exception as e:
+        return html.Span(f"Error: {e}", style={"color": "red"})
+
+
 # ── Map callback ──────────────────────────────────────────────────────────────
 
 @app.callback(
@@ -5567,19 +5717,27 @@ def render_service_map(active_tab, dep_filter):
                     if not sw and not pl:
                         hover_parts.append("Crew: Unassigned")
                     hovers.append("<br>".join(hover_parts))
+                crew_color = indiv_color.get(crew, "#888888")
                 fig.add_trace(go.Scattermap(
                     lat=lats,
                     lon=lons,
                     mode="markers",
                     marker=dict(
                         size=sizes,
-                        color=indiv_color.get(crew, "#888888"),
+                        color=crew_color,
                         opacity=0.95,
                     ),
                     text=hovers,
                     hoverinfo="text",
                     name=crew,
                     showlegend=True,
+                    cluster=dict(
+                        enabled=True,
+                        color=crew_color,
+                        size=[15, 20, 25, 30],
+                        step=[5, 10, 25, 50],
+                        maxzoom=13,
+                    ),
                 ))
 
         title = "DC Service Map"

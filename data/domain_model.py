@@ -504,6 +504,17 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
 
         dep_logs = dep_logs.sort_values("picture_submitted_at").reset_index(drop=True)
         total_sites = count_billable_routes(dep_logs)
+
+        dep_overrides = config.get("deployment_overrides", {}).get(label, {})
+        ov_sw = dep_overrides.get("sw_routes")
+        ov_pl = dep_overrides.get("pl_routes")
+        if ov_sw is not None and ov_pl is not None:
+            total_sites = ov_sw + ov_pl
+        elif ov_sw is not None:
+            total_sites = ov_sw + max(total_sites - ov_sw, 0)
+        elif ov_pl is not None:
+            total_sites = max(total_sites - ov_pl, 0) + ov_pl
+
         if total_sites == 0:
             continue
         start_time = dep_logs["picture_submitted_at"].min()
