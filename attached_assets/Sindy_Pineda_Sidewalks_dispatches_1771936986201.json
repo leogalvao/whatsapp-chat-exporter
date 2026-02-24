@@ -1,0 +1,40 @@
+{
+  "crew": "Sindy Pineda Sidewalks",
+  "dispatches": [
+    {
+      "image_path": "Sindy Pineda Sidewalks/20260224_063029/media/image_10.jpg",
+      "matched_message": "Palisades community center",
+      "message_timestamp": "2026-02-23T13:00:00",
+      "ocr_snippet": "9 PALISADES COMMUNITY CENTER| 5200 SHERRIER PLACE NW, Washington, DC",
+      "confidence": 0.8
+    },
+    {
+      "image_path": "Sindy Pineda Sidewalks/20260224_063029/media/image_11.jpg",
+      "matched_message": "Okay esta bien",
+      "message_timestamp": "2026-02-23T00:57:00",
+      "ocr_snippet": "gray SY A TE Hu é = stay",
+      "confidence": 0.3684210526315789
+    },
+    {
+      "image_path": "Sindy Pineda Sidewalks/20260224_063029/media/image_12.jpg",
+      "matched_message": "Truesdell Education Campus",
+      "message_timestamp": "2026-02-23T00:58:00",
+      "ocr_snippet": "SW Crew 15 Israel Pineda stop_order site_name address ward 1 TRUESDELL EDUCATION CAMPUS 800 INGRAHAM STREET NW, Washington, DC 4 2 HAMILTON RECREATION CENTER 1340 HAMILTON STREET NW, Washington, DC 4 ...",
+      "confidence": 0.8
+    },
+    {
+      "image_path": "Sindy Pineda Sidewalks/20260224_063012/media/image_5.jpg",
+      "matched_message": "301 VAN BUREN STREET NW, Washington, DC",
+      "message_timestamp": "2026-02-23T13:14:00",
+      "ocr_snippet": "6 MILITARY ROAD EARLY LEARNING CENTER 1375 Missouri Avenue Northwest, Washington, DC 7 BRIGHTWOOD EDUCATION CAMPUS 1300 NICHOLSON STREET NW, Washington, DC",
+      "confidence": 0.31958762886597936
+    },
+    {
+      "image_path": "Sindy Pineda Sidewalks/20260224_063012/media/image_8.jpg",
+      "matched_message": "301 VAN BUREN STREET NW, Washington, DC",
+      "message_timestamp": "2026-02-23T13:14:00",
+      "ocr_snippet": "6 FORT STEVENS RECREATION CENTER, 1327 VAN BUREN STREET NW, Washington, DC",
+      "confidence": 0.6548672566371682
+    }
+  ]
+}

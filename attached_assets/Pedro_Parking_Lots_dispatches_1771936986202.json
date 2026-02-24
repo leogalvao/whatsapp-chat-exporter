@@ -1,0 +1,40 @@
+{
+  "crew": "Pedro Parking Lots",
+  "dispatches": [
+    {
+      "image_path": "Pedro Parking Lots/20260224_062723/media/image_1.jpg",
+      "matched_message": "Franklin D  reeves center",
+      "message_timestamp": "2026-02-23T04:38:00",
+      "ocr_snippet": "FAMILY. AND YOUTH CENTER",
+      "confidence": 0.4897959183673469
+    },
+    {
+      "image_path": "Pedro Parking Lots/20260224_062723/media/image_6.jpg",
+      "matched_message": "The Aston",
+      "message_timestamp": "2026-02-23T10:08:00",
+      "ocr_snippet": "7 The Aston 1129 New Hampshire Avenue Northwest, Washington, DC 8 John R. Francis Education Campus 2425 N STREET NW, Washington, DC 9 FRANCIS DOG PARK 2435 N Street NW, Washington, DC",
+      "confidence": 0.8
+    },
+    {
+      "image_path": "Pedro Parking Lots/20260224_062723/media/image_10.jpg",
+      "matched_message": "Janney elementary schools",
+      "message_timestamp": "2026-02-23T12:51:00",
+      "ocr_snippet": "9 JANNEY ELEMENTARY SCHOOL 4130 ALBEMARLE STREET NW, Washington, DC",
+      "confidence": 0.5434782608695652
+    },
+    {
+      "image_path": "Pedro Parking Lots/20260224_062723/media/image_12.jpg",
+      "matched_message": "2500 GEORGIA AVENUE NW, Washington, DC",
+      "message_timestamp": "2026-02-23T13:44:00",
+      "ocr_snippet": "6 FRIENDSHIP RECREATION CENTER 4500 VAN NESS STREET NW, Washington, DC",
+      "confidence": 0.5
+    },
+    {
+      "image_path": "Pedro Parking Lots/20260224_062707/media/image_4.jpg",
+      "matched_message": "2500 GEORGIA AVENUE NW, Washington, DC",
+      "message_timestamp": "2026-02-23T13:44:00",
+      "ocr_snippet": "7800 14th Street Northwest [5505 Sth Street NW",
+      "confidence": 0.2857142857142857
+    }
+  ]
+}
