@@ -1400,6 +1400,62 @@ def api_upload_folder():
     return flask_jsonify({"saved": saved, "skipped": len(skipped), "errors": errors})
 
 
+# ── Upload component ─────────────────────────────────────────────────────────
+
+upload_section = html.Div([
+    dbc.Row([
+        dbc.Col([
+            dcc.Upload(
+                id="upload-data",
+                children=html.Div([
+                    "Drag & drop JSON files here, or ",
+                    html.A("click to browse files", className="text-primary fw-bold"),
+                ], style={"lineHeight": "40px"}),
+                style={
+                    "borderWidth": "2px",
+                    "borderStyle": "dashed",
+                    "borderRadius": "8px",
+                    "borderColor": "#adb5bd",
+                    "textAlign": "center",
+                    "padding": "10px 15px",
+                    "cursor": "pointer",
+                    "backgroundColor": "#f8f9fa",
+                    "height": "60px",
+                },
+                multiple=True,
+                accept=".json",
+            ),
+        ], width=5),
+        dbc.Col([
+            html.Div(
+                [
+                    html.Span("or "),
+                    html.A("Upload a Folder", id="folder-upload-btn",
+                           className="text-primary fw-bold",
+                           style={"cursor": "pointer", "textDecoration": "underline"}),
+                    html.Span(" containing JSON files"),
+                ],
+                style={
+                    "borderWidth": "2px",
+                    "borderStyle": "dashed",
+                    "borderRadius": "8px",
+                    "borderColor": "#adb5bd",
+                    "textAlign": "center",
+                    "padding": "10px 15px",
+                    "backgroundColor": "#f8f9fa",
+                    "height": "60px",
+                    "lineHeight": "40px",
+                },
+            ),
+        ], width=5),
+        dbc.Col([
+            html.Div(id="upload-status", className="text-center",
+                     style={"lineHeight": "60px"}),
+        ], width=2),
+    ], className="g-2 mb-2"),
+])
+
+
 # ── Main content (tabs) ─────────────────────────────────────────────────────
 
 main_content = dbc.Tabs(
@@ -1771,6 +1827,13 @@ main_content = dbc.Tabs(
                 html.P("Configure crew location types and sender tracking. Changes are saved automatically and applied to all analytics.",
                        className="text-muted mb-3", style={"fontSize": "14px"}),
             ], className="mt-3 mb-2 px-1"),
+            html.Div([
+                html.H5("Chat Data Import", className="mb-2"),
+                html.P("Upload WhatsApp chat export JSON files or a folder of JSON files.",
+                       className="text-muted mb-2", style={"fontSize": "13px"}),
+                upload_section,
+            ], className="mb-3 px-1"),
+            html.Hr(className="my-3"),
             dbc.Row([
                 dbc.Col([
                     html.H5("Crew Location Types", className="mb-2"),
@@ -1942,60 +2005,6 @@ main_content = dbc.Tabs(
 )
 
 
-# ── Upload component ─────────────────────────────────────────────────────────
-
-upload_section = html.Div([
-    dbc.Row([
-        dbc.Col([
-            dcc.Upload(
-                id="upload-data",
-                children=html.Div([
-                    "Drag & drop JSON files here, or ",
-                    html.A("click to browse files", className="text-primary fw-bold"),
-                ], style={"lineHeight": "40px"}),
-                style={
-                    "borderWidth": "2px",
-                    "borderStyle": "dashed",
-                    "borderRadius": "8px",
-                    "borderColor": "#adb5bd",
-                    "textAlign": "center",
-                    "padding": "10px 15px",
-                    "cursor": "pointer",
-                    "backgroundColor": "#f8f9fa",
-                    "height": "60px",
-                },
-                multiple=True,
-                accept=".json",
-            ),
-        ], width=5),
-        dbc.Col([
-            html.Div(
-                [
-                    html.Span("or "),
-                    html.A("Upload a Folder", id="folder-upload-btn",
-                           className="text-primary fw-bold",
-                           style={"cursor": "pointer", "textDecoration": "underline"}),
-                    html.Span(" containing JSON files"),
-                ],
-                style={
-                    "borderWidth": "2px",
-                    "borderStyle": "dashed",
-                    "borderRadius": "8px",
-                    "borderColor": "#adb5bd",
-                    "textAlign": "center",
-                    "padding": "10px 15px",
-                    "backgroundColor": "#f8f9fa",
-                    "height": "60px",
-                    "lineHeight": "40px",
-                },
-            ),
-        ], width=5),
-        dbc.Col([
-            html.Div(id="upload-status", className="text-center",
-                     style={"lineHeight": "60px"}),
-        ], width=2),
-    ], className="g-2 mb-2"),
-])
 
 _FOLDER_UPLOAD_JS = """
 <script>
@@ -2209,7 +2218,6 @@ def _build_sidebar():
 def serve_layout():
     return dbc.Container(
         [
-            upload_section,
             dbc.Row([
                 dbc.Col(html.Div(id="kpi-bar"), md=10),
                 dbc.Col(html.Div([
