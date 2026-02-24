@@ -6169,6 +6169,8 @@ def _render_invoice_list(invoices_registry):
         ],
         data=rows,
         editable=True,
+        row_selectable="multi",
+        selected_rows=[],
         style_table={"overflowX": "auto"},
         style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
         style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px"},
@@ -6214,20 +6216,12 @@ def _render_invoice_list(invoices_registry):
     ])
 
     delete_section = html.Div([
-        html.Hr(),
-        html.H6("Delete Invoice", className="mt-3"),
-        dbc.Row([
-            dbc.Col([
-                dbc.Input(id="invoice-delete-id", placeholder="Invoice ID to delete", size="sm"),
-            ], md=4),
-            dbc.Col([
-                dbc.Button("Delete", id="invoice-delete-btn", color="danger", size="sm"),
-            ], md=2),
-        ], className="mb-2"),
-        html.Div(id="invoice-delete-status"),
+        dbc.Button("Delete Selected", id="invoice-delete-btn", color="danger", size="sm", className="mt-2 me-2"),
+        dbc.Button("Delete All", id="invoice-delete-all-btn", color="outline-danger", size="sm", className="mt-2"),
+        html.Div(id="invoice-delete-status", className="mt-1"),
     ])
 
-    return html.Div([table, dep_helper, save_section, split_section, delete_section])
+    return html.Div([table, dep_helper, save_section, delete_section, split_section])
 
 
 @app.callback(
@@ -6362,25 +6356,25 @@ def split_invoice(n_clicks, inv_id, deps_str, pcts_str):
     [Output("invoice-delete-status", "children"),
      Output("invoice-list-container", "children", allow_duplicate=True)],
     Input("invoice-delete-btn", "n_clicks"),
-    State("invoice-delete-id", "value"),
+    State("invoice-registry-table", "selected_rows"),
+    State("invoice-registry-table", "data"),
     prevent_initial_call=True,
 )
-def delete_invoice(n_clicks, inv_id):
+def delete_selected_invoices(n_clicks, selected_rows, table_data):
     global SNOW_CONFIG
-    if not n_clicks or not inv_id:
+    if not n_clicks or not selected_rows or not table_data:
         raise PreventUpdate
 
-    invoices_registry = SNOW_CONFIG.get("invoices", [])
-    target = None
-    for inv in invoices_registry:
-        if inv.get("invoice_id") == inv_id.strip():
-            target = inv
-            break
-    if not target:
-        return html.Span(f"Invoice ID '{inv_id}' not found.", style={"color": "red"}), no_update
+    ids_to_delete = set()
+    for idx in selected_rows:
+        if idx < len(table_data):
+            ids_to_delete.add(table_data[idx].get("invoice_id", ""))
 
-    invoices_registry.remove(target)
-    SNOW_CONFIG["invoices"] = invoices_registry
+    if not ids_to_delete:
+        return html.Span("No invoices selected.", style={"color": "orange"}), no_update
+
+    invoices_registry = SNOW_CONFIG.get("invoices", [])
+    SNOW_CONFIG["invoices"] = [inv for inv in invoices_registry if inv.get("invoice_id") not in ids_to_delete]
 
     config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
     try:
@@ -6390,8 +6384,35 @@ def delete_invoice(n_clicks, inv_id):
         return html.Span(f"Save error: {e}", style={"color": "red"}), no_update
 
     return (
-        html.Span(f"Deleted invoice {inv_id}.", style={"color": "green"}),
+        html.Span(f"Deleted {len(ids_to_delete)} invoice(s).", style={"color": "green"}),
         _render_invoice_list(SNOW_CONFIG.get("invoices", []))
+    )
+
+
+@app.callback(
+    [Output("invoice-delete-status", "children", allow_duplicate=True),
+     Output("invoice-list-container", "children", allow_duplicate=True)],
+    Input("invoice-delete-all-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def delete_all_invoices(n_clicks):
+    global SNOW_CONFIG
+    if not n_clicks:
+        raise PreventUpdate
+
+    count = len(SNOW_CONFIG.get("invoices", []))
+    SNOW_CONFIG["invoices"] = []
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(SNOW_CONFIG, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return html.Span(f"Save error: {e}", style={"color": "red"}), no_update
+
+    return (
+        html.Span(f"Deleted all {count} invoice(s).", style={"color": "green"}),
+        _render_invoice_list([])
     )
 
 
