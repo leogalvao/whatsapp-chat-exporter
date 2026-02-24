@@ -1531,6 +1531,39 @@
       senderEl.setAttribute('data-wa-sender-extracted', 'true');
     }
 
+    // Priority 6: Extract sender from data-pre-plain-text attribute.
+    // Format: "[time, date] Sender Name: " — the sender is between ] and the trailing :
+    if (!message.sender) {
+      const prePlainEl = msgEl.querySelector('[data-pre-plain-text]');
+      if (prePlainEl) {
+        const attr = prePlainEl.getAttribute('data-pre-plain-text');
+        const senderMatch = attr.match(/\]\s*([^:]+):\s*$/);
+        if (senderMatch) {
+          const extractedSender = senderMatch[1].trim();
+          if (extractedSender && extractedSender.length > 0 && extractedSender.length <= 80) {
+            message.sender = extractedSender;
+            log(`Sender found via Priority 6 (data-pre-plain-text): "${extractedSender}"`);
+          }
+        }
+      }
+    }
+
+    // Priority 7: Extract sender from aria-label on the message row.
+    // WhatsApp sometimes includes the sender in the row's aria-label.
+    if (!message.sender && !message.isOutgoing) {
+      const rowEl = msgEl.closest('[role="row"]') || msgEl;
+      const ariaLabel = rowEl.getAttribute('aria-label') || '';
+      // Typical format: "Sender Name, 12:48 PM" or just the sender name
+      if (ariaLabel) {
+        // Strip trailing timestamp patterns like ", 12:48 PM" or ", 14:48"
+        const cleaned = ariaLabel.replace(/,\s*\d{1,2}:\d{2}(\s*[AP]M)?\s*$/i, '').trim();
+        if (cleaned && cleaned.length > 0 && cleaned.length <= 80) {
+          message.sender = cleaned;
+          log(`Sender found via Priority 7 (row aria-label): "${cleaned}"`);
+        }
+      }
+    }
+
     if (!message.sender && !message.isOutgoing) {
       // Diagnostic: dump the first few spans/elements so we can see the DOM structure
       const msgContainer = msgEl.querySelector('[data-testid="msg-container"]') || msgEl;
