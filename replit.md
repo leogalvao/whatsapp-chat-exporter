@@ -45,6 +45,7 @@ The dashboard has 9 tabs:
 - **Location Type Auto-Detection**: Infers Sidewalk/Parking Lot from chat names
 - **Trackable Sender Filtering**: Excludes non-trackable senders from Operations KPIs
 - **Deployment Burn-Down**: Compares actual site completion pace vs expected (configurable, default 12hr)
+- **Crew Merge**: Merge two crews that are the same team under different chat names across deployments; persists to config and applies on reload; undo-able
 - **File Upload**: Drag-and-drop JSON files or upload entire folders
 - **Deployment Reports**: Downloadable HTML reports with all deployment charts
 

@@ -605,6 +605,17 @@ def load_all_data(data_dir):
         ])
     df["export_date"] = pd.to_datetime(df["export_date"])
     df["msg_date"] = pd.to_datetime(df["msg_date"])
+
+    config_path = os.path.join(data_dir, "config", "snow_removal.json")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        crew_merges = cfg.get("crew_merges", {})
+        if crew_merges and not df.empty:
+            df["chat"] = df["chat"].replace(crew_merges)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
     return df
 
 
@@ -1682,6 +1693,34 @@ main_content = dbc.Tabs(
                         ], md=4),
                     ]),
                 ], md=6),
+            ]),
+            html.Hr(className="my-3"),
+            dbc.Row([
+                dbc.Col([
+                    html.H5("Crew Merge", className="mb-2"),
+                    html.P("Merge two crews that are the same team but appear under different chat names across deployments. "
+                           "Select the primary crew (name to keep) and the secondary crew (to merge into primary). "
+                           "All messages from the secondary crew will be reassigned to the primary.",
+                           className="text-muted mb-2", style={"fontSize": "13px"}),
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("Primary Crew (keep this name)", className="mb-1 fw-bold"),
+                            dcc.Dropdown(id="merge-primary-crew", placeholder="Select primary crew...",
+                                         style={"fontSize": "13px"}),
+                        ], md=5),
+                        dbc.Col([
+                            dbc.Label("Secondary Crew (merge into primary)", className="mb-1 fw-bold"),
+                            dcc.Dropdown(id="merge-secondary-crew", placeholder="Select crew to merge...",
+                                         style={"fontSize": "13px"}),
+                        ], md=5),
+                        dbc.Col([
+                            dbc.Button("Merge", id="merge-crews-btn", color="warning",
+                                       className="mt-4", n_clicks=0),
+                        ], md=2),
+                    ], className="mb-2"),
+                    html.Div(id="merge-status", className="mb-2"),
+                    html.Div(id="merge-list-container"),
+                ], md=12),
             ]),
             html.Hr(className="my-3"),
             dbc.Row([
@@ -4745,6 +4784,122 @@ def save_settings(n_clicks, crew_values, crew_ids, track_values, track_ids,
         return html.Span("Settings saved!", style={"color": "green", "fontWeight": "bold"})
     except Exception as e:
         return html.Span(f"Error saving: {e}", style={"color": "red"})
+
+
+# ── Crew Merge Callbacks ─────────────────────────────────────────────────────
+
+@app.callback(
+    [Output("merge-primary-crew", "options"),
+     Output("merge-secondary-crew", "options"),
+     Output("merge-list-container", "children")],
+    Input("main-tabs", "active_tab"),
+    Input("merge-status", "children"),
+)
+def render_crew_merge_ui(active_tab, _status_trigger):
+    if active_tab != "tab-settings":
+        raise PreventUpdate
+
+    all_chats_full = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
+    options = [{"label": c, "value": c} for c in all_chats_full]
+
+    merges = SNOW_CONFIG.get("crew_merges", {})
+    if merges:
+        rows = []
+        for secondary, primary in merges.items():
+            rows.append(
+                dbc.Row([
+                    dbc.Col(html.Span(f"{secondary}", style={"fontSize": "13px"}), md=5),
+                    dbc.Col(html.Span(f" \u2192 {primary}", style={"fontSize": "13px", "fontWeight": "bold"}), md=5),
+                    dbc.Col(
+                        dbc.Button("\u00d7", id={"type": "unmerge-btn", "crew": secondary},
+                                   color="danger", size="sm", outline=True, n_clicks=0),
+                        md=2),
+                ], className="mb-1 align-items-center")
+            )
+        merge_list = html.Div([
+            html.H6("Active Merges", className="mt-2 mb-1"),
+            html.Div(rows, style={"maxHeight": "200px", "overflowY": "auto"}),
+        ])
+    else:
+        merge_list = html.Div()
+
+    return options, options, merge_list
+
+
+@app.callback(
+    Output("merge-status", "children", allow_duplicate=True),
+    Input("merge-crews-btn", "n_clicks"),
+    State("merge-primary-crew", "value"),
+    State("merge-secondary-crew", "value"),
+    prevent_initial_call=True,
+)
+def merge_crews(n_clicks, primary, secondary):
+    global SNOW_CONFIG, DF_ALL
+    if not n_clicks or not primary or not secondary:
+        raise PreventUpdate
+    if primary == secondary:
+        return html.Span("Primary and secondary crews cannot be the same.", style={"color": "red"})
+
+    merges = SNOW_CONFIG.get("crew_merges", {})
+    merges[secondary] = primary
+    SNOW_CONFIG["crew_merges"] = merges
+
+    config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(SNOW_CONFIG, f, indent=2)
+    except Exception as e:
+        return html.Span(f"Error saving: {e}", style={"color": "red"})
+
+    if not DF_ALL.empty:
+        DF_ALL.loc[DF_ALL["chat"] == secondary, "chat"] = primary
+    _reload_global_data()
+
+    return html.Span(
+        f"Merged \"{secondary}\" into \"{primary}\". Data reloaded.",
+        style={"color": "green", "fontWeight": "bold"}
+    )
+
+
+@app.callback(
+    Output("merge-status", "children", allow_duplicate=True),
+    Input({"type": "unmerge-btn", "crew": ALL}, "n_clicks"),
+    State({"type": "unmerge-btn", "crew": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def unmerge_crew(n_clicks_list, id_list):
+    global SNOW_CONFIG
+    if not n_clicks_list or not any(n_clicks_list):
+        raise PreventUpdate
+
+    clicked_idx = None
+    for i, n in enumerate(n_clicks_list):
+        if n and n > 0:
+            clicked_idx = i
+            break
+    if clicked_idx is None:
+        raise PreventUpdate
+
+    secondary = id_list[clicked_idx]["crew"]
+    merges = SNOW_CONFIG.get("crew_merges", {})
+    if secondary in merges:
+        removed_primary = merges.pop(secondary)
+        SNOW_CONFIG["crew_merges"] = merges
+
+        config_path = os.path.join(DATA_DIR, "config", "snow_removal.json")
+        try:
+            with open(config_path, "w") as f:
+                json.dump(SNOW_CONFIG, f, indent=2)
+        except Exception:
+            pass
+
+        _reload_global_data()
+        return html.Span(
+            f"Removed merge: \"{secondary}\" is now separate from \"{removed_primary}\". Data reloaded.",
+            style={"color": "green", "fontWeight": "bold"}
+        )
+    raise PreventUpdate
 
 
 # ── Location CSV upload callback ──────────────────────────────────────────────
