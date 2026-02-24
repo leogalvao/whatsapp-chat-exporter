@@ -363,7 +363,7 @@ def parse_export_date(iso_str):
         return date(2026, 2, 8)
 
 
-EXCLUDE_DIRS = {".claude", "__pycache__", "node_modules"}
+EXCLUDE_DIRS = {".claude", "__pycache__", "node_modules", "config"}
 
 
 def _normalize_chat_name(name):
@@ -377,47 +377,163 @@ def _normalize_chat_name(name):
     return stripped.lower().strip()
 
 
-def _discover_json_files(data_dir):
-    """Find all WhatsApp JSON exports under *data_dir*.
+def _classify_json_file(path):
+    """Classify a JSON file by its schema.
 
-    Sources (in order):
-      1. ``archive/whatsapp_*.json``  — legacy archive exports
-      2. ``<Worker>/<timestamp_dir>/<Worker>.json`` — new v1.2 subfolder exports
-    Directories in EXCLUDE_DIRS are skipped.
-    Files ending with ``_dispatches.json`` are OCR dispatch data, not chat
-    exports, and are skipped.
+    Returns one of:
+      - 'combined'  : Combined_Messages.json (unified multi-chat export)
+      - 'legacy'    : Per-chat WhatsApp export (exportInfo + messages)
+      - 'metrics'   : metrics_report.json (pre-computed metrics)
+      - 'dispatches': OCR dispatch data
+      - 'unknown'   : Unrecognised format
     """
-    paths = []
+    basename = os.path.basename(path)
+    if basename.endswith("_dispatches.json"):
+        return "dispatches"
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return "unknown"
 
+    if not isinstance(data, dict):
+        return "unknown"
+
+    if "summary" in data and "crew_metrics" in data:
+        return "metrics"
+
+    if "exportInfo" not in data or "messages" not in data:
+        return "unknown"
+
+    msgs = data.get("messages", [])
+    if msgs and isinstance(msgs[0], dict) and "chatName" in msgs[0]:
+        return "combined"
+
+    return "legacy"
+
+
+def _discover_json_files(data_dir):
+    """Find all JSON files under *data_dir* and classify them.
+
+    Returns (chat_paths, metrics_path) where chat_paths is a list of
+    legacy or combined chat export files, and metrics_path is the path
+    to a metrics_report.json if found (else None).
+    """
+    chat_paths = []
+    metrics_path = None
+
+    all_json = []
     for p in glob.glob(os.path.join(data_dir, "archive", "*.json")):
-        if not os.path.basename(p).endswith("_dispatches.json"):
-            paths.append(p)
-
+        all_json.append(p)
     for root, dirs, files in os.walk(data_dir):
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and d != "archive"]
         for fn in files:
-            if fn.endswith(".json") and not fn.endswith("_dispatches.json"):
-                paths.append(os.path.join(root, fn))
+            if fn.endswith(".json"):
+                all_json.append(os.path.join(root, fn))
 
-    return sorted(set(paths))
+    for p in sorted(set(all_json)):
+        kind = _classify_json_file(p)
+        if kind in ("legacy", "combined"):
+            chat_paths.append(p)
+        elif kind == "metrics":
+            metrics_path = p
+
+    return chat_paths, metrics_path
 
 
-def load_all_data(data_dir):
-    """Load all JSON chat files, de-duplicate by chatName, build DataFrame.
+def _process_message(m, chat_name, export_date, prev_sender_ref):
+    """Process a single message dict into a row dict for the DataFrame."""
+    msg_id = m.get("id", "")
+    sender = m.get("sender", "") or ""
+    ts_str = m.get("timestamp", "") or ""
+    content_raw = m.get("content", "") or ""
+    msg_type = m.get("type", "text") or "text"
+    is_outgoing = bool(m.get("isOutgoing", False))
+    is_forwarded = bool(m.get("isForwarded", False))
+    is_deleted = bool(m.get("isDeleted", False))
+    ts = parse_msg_datetime(m, export_date)
 
-    Supports both legacy exports and the v2 CrewChatData format which adds
-    id, isOutgoing, isForwarded, isDeleted, and media detail fields.
+    media_obj = m.get("media")
+    media_type = media_obj.get("type", "") if isinstance(media_obj, dict) else ""
+    media_src = media_obj.get("exportedFilename", "") if isinstance(media_obj, dict) else ""
+    has_media = media_obj is not None
 
-    Chat names are normalized (case-insensitive, accent-folded) so that
-    variants like "Julián Ordóñez" and "julian ordonez" merge into one group.
-    The canonical display name is taken from the file with the most messages.
+    if _is_fake_sender(sender):
+        if not content_raw or content_raw == "[Image]":
+            content_raw = sender
+        sender = ""
 
-    When multiple files share the same normalized chatName the one with
-    the most messages wins.  Within a file, messages are de-duplicated by
-    their ``id`` field (v2 format) so re-exports don't inflate counts.
+    noise = classify_noise(m)
+    content_clean = clean_content(content_raw)
+
+    sender_resolved = sender if sender else prev_sender_ref[0]
+    if sender:
+        prev_sender_ref[0] = sender
+
+    msg_date = ts.date() if ts else (export_date if export_date else None)
+
+    return {
+        "chat": chat_name,
+        "sender": sender,
+        "sender_resolved": sender_resolved,
+        "timestamp": ts_str,
+        "time": ts,
+        "hour": ts.hour + ts.minute / 60.0 if ts else None,
+        "hour_int": ts.hour if ts else None,
+        "msg_date": msg_date,
+        "type": msg_type,
+        "content_raw": content_raw,
+        "content": content_clean,
+        "content_len": len(content_clean),
+        "location": extract_location(content_clean),
+        "noise_type": noise,
+        "export_date": export_date,
+        "msg_id": msg_id,
+        "is_outgoing": is_outgoing,
+        "is_forwarded": is_forwarded,
+        "is_deleted": is_deleted,
+        "has_media": has_media,
+        "media_type": media_type,
+        "media_file": media_src,
+    }
+
+
+def _load_combined_file(path):
+    """Load a Combined_Messages.json (unified multi-chat export).
+
+    Each message has a ``chatName`` field identifying which crew/chat it
+    belongs to. Messages are de-duplicated by ``id``.
     """
-    chat_files = {}  # norm_key -> (path, msgs, export_date, display_name)
-    for path in _discover_json_files(data_dir):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    export_date = parse_export_date(data.get("exportInfo", {}).get("exportDate", ""))
+    msgs = data.get("messages", [])
+
+    rows = []
+    seen_ids = set()
+    prev_by_chat = {}
+    for m in msgs:
+        msg_id = m.get("id", "")
+        if msg_id:
+            if msg_id in seen_ids:
+                continue
+            seen_ids.add(msg_id)
+        chat_name = m.get("chatName", data.get("exportInfo", {}).get("chatName", "Unknown"))
+        if chat_name not in prev_by_chat:
+            prev_by_chat[chat_name] = [""]
+        row = _process_message(m, chat_name, export_date, prev_by_chat[chat_name])
+        rows.append(row)
+    return rows
+
+
+def _load_legacy_files(paths):
+    """Load legacy per-chat WhatsApp JSON exports.
+
+    De-duplicates by normalized chatName (accent-folded, lowercased),
+    keeping the file with the most messages.
+    """
+    chat_files = {}
+    for path in paths:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -434,7 +550,7 @@ def load_all_data(data_dir):
 
     rows = []
     for _key, (path, msgs, export_date, chat_name) in chat_files.items():
-        prev_sender = ""
+        prev_sender_ref = [""]
         seen_ids = set()
         for m in msgs:
             msg_id = m.get("id", "")
@@ -442,59 +558,41 @@ def load_all_data(data_dir):
                 if msg_id in seen_ids:
                     continue
                 seen_ids.add(msg_id)
+            row = _process_message(m, chat_name, export_date, prev_sender_ref)
+            rows.append(row)
+    return rows
 
-            sender = m.get("sender", "") or ""
-            ts_str = m.get("timestamp", "") or ""
-            content_raw = m.get("content", "") or ""
-            msg_type = m.get("type", "text") or "text"
-            is_outgoing = bool(m.get("isOutgoing", False))
-            is_forwarded = bool(m.get("isForwarded", False))
-            is_deleted = bool(m.get("isDeleted", False))
-            ts = parse_msg_datetime(m, export_date)
 
-            media_obj = m.get("media")
-            media_type = media_obj.get("type", "") if isinstance(media_obj, dict) else ""
-            media_src = media_obj.get("exportedFilename", "") if isinstance(media_obj, dict) else ""
-            has_media = media_obj is not None
+def load_all_data(data_dir):
+    """Load all JSON chat files, build DataFrame.
 
-            if _is_fake_sender(sender):
-                if not content_raw or content_raw == "[Image]":
-                    content_raw = sender
-                sender = ""
+    Supports three formats:
+      1. Combined_Messages.json — unified multi-chat export with per-message chatName
+      2. Legacy per-chat exports — individual files with exportInfo.chatName
+      3. v2 CrewChatData format — legacy with id, isOutgoing, isForwarded, isDeleted fields
 
-            noise = classify_noise(m)
-            content_clean = clean_content(content_raw)
+    Chat names are normalized (case-insensitive, accent-folded) for de-duplication.
+    Messages are de-duplicated by their ``id`` field to prevent inflation from re-exports.
+    """
+    chat_paths, metrics_path = _discover_json_files(data_dir)
 
-            sender_resolved = sender if sender else prev_sender
-            if sender:
-                prev_sender = sender
+    combined_paths = []
+    legacy_paths = []
+    for p in chat_paths:
+        kind = _classify_json_file(p)
+        if kind == "combined":
+            combined_paths.append(p)
+        else:
+            legacy_paths.append(p)
 
-            msg_date = ts.date() if ts else (export_date if export_date else None)
-
-            rows.append({
-                "chat": chat_name,
-                "sender": sender,
-                "sender_resolved": sender_resolved,
-                "timestamp": ts_str,
-                "time": ts,
-                "hour": ts.hour + ts.minute / 60.0 if ts else None,
-                "hour_int": ts.hour if ts else None,
-                "msg_date": msg_date,
-                "type": msg_type,
-                "content_raw": content_raw,
-                "content": content_clean,
-                "content_len": len(content_clean),
-                "location": extract_location(content_clean),
-                "noise_type": noise,
-                "export_date": export_date,
-                "msg_id": msg_id,
-                "is_outgoing": is_outgoing,
-                "is_forwarded": is_forwarded,
-                "is_deleted": is_deleted,
-                "has_media": has_media,
-                "media_type": media_type,
-                "media_file": media_src,
-            })
+    rows = []
+    for cp in combined_paths:
+        try:
+            rows.extend(_load_combined_file(cp))
+        except Exception as e:
+            print(f"  Error loading combined file {cp}: {e}")
+    if legacy_paths:
+        rows.extend(_load_legacy_files(legacy_paths))
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -510,9 +608,31 @@ def load_all_data(data_dir):
     return df
 
 
+def load_metrics_report(data_dir):
+    """Load metrics_report.json if present.
+
+    Returns dict with keys: summary, crew_metrics, daily_breakdown,
+    productivity_scores, site_visits.  Returns None if not found.
+    """
+    _, metrics_path = _discover_json_files(data_dir)
+    if not metrics_path:
+        return None
+    try:
+        with open(metrics_path, encoding="utf-8") as f:
+            data = json.load(f)
+        required = {"summary", "crew_metrics"}
+        if not required.issubset(data.keys()):
+            return None
+        return data
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  Error loading metrics report: {e}")
+        return None
+
+
 # ── Build global DataFrame ───────────────────────────────────────────────────
 
 DF_ALL = load_all_data(DATA_DIR)
+METRICS_REPORT = load_metrics_report(DATA_DIR)
 SNOW_CONFIG = load_config(os.path.join(DATA_DIR, "config", "snow_removal.json"))
 
 
@@ -1130,6 +1250,14 @@ def api_upload_folder():
         try:
             raw = f.read()
             data = json.loads(raw.decode("utf-8"))
+
+            if isinstance(data, dict) and "summary" in data and "crew_metrics" in data:
+                save_path = os.path.join(archive_dir, "metrics_report.json")
+                with open(save_path, "w", encoding="utf-8") as out:
+                    json.dump(data, out, ensure_ascii=False)
+                saved.append("metrics_report.json")
+                continue
+
             if "exportInfo" not in data or "messages" not in data:
                 errors.append(f.filename)
                 continue
@@ -1930,8 +2058,10 @@ def _reload_global_data():
     global TOTAL_MSGS, CLEAN_MSGS, NOISE_MSGS, NUM_CHATS, NUM_SENDERS
     global SNOW_CONFIG
     global PRICING_DATA, PRICING_INDEX
+    global METRICS_REPORT
 
     DF_ALL = load_all_data(DATA_DIR)
+    METRICS_REPORT = load_metrics_report(DATA_DIR)
     ALL_CHATS = sorted(DF_ALL["chat"].unique()) if not DF_ALL.empty else []
     _nt = set(SNOW_CONFIG.get("non_trackable_senders", []))
     ALL_SENDERS = sorted(s for s in DF_ALL[DF_ALL["sender"] != ""]["sender"].unique()
@@ -2001,9 +2131,18 @@ def handle_upload(contents_list, filenames_list):
             content_type, content_string = content.split(",", 1)
             decoded = base64.b64decode(content_string)
             data = json.loads(decoded.decode("utf-8"))
-            if "exportInfo" not in data or "messages" not in data:
-                errors.append(f"{filename}: not a valid WhatsApp export")
+
+            if isinstance(data, dict) and "summary" in data and "crew_metrics" in data:
+                save_path = os.path.join(archive_dir, "metrics_report.json")
+                with open(save_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+                saved.append("metrics_report.json")
                 continue
+
+            if not isinstance(data, dict) or "exportInfo" not in data or "messages" not in data:
+                errors.append(f"{filename}: not a valid chat export or metrics file")
+                continue
+
             safe_name = os.path.basename(filename)
             safe_name = re.sub(r"[^\w.\-]", "_", safe_name)
             if not safe_name.endswith(".json"):
@@ -5495,7 +5634,7 @@ def print_report():
     print(f"\n{sep}")
     print("  File De-duplication")
     print(sep)
-    all_files = _discover_json_files(DATA_DIR)
+    all_files, _ = _discover_json_files(DATA_DIR)
     chat_file_count = {}
     for path in all_files:
         try:

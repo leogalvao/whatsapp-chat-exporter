@@ -49,10 +49,16 @@ The dashboard has 9 tabs:
 - **Deployment Reports**: Downloadable HTML reports with all deployment charts
 
 ## Running
-The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads WhatsApp JSON exports from the `data/` directory (files matching `whatsapp_*.json`).
+The dashboard runs via `python data/dashboard_web.py` on port 5000. It reads JSON exports from the `data/` directory.
 
 ## Data Files
 JSON chat exports are gitignored. Place exported files in `data/archive/` or `data/` subdirectories.
+
+### Supported File Formats
+1. **Combined_Messages.json** — Unified multi-chat export (Gemini-cleaned). Single file with all chats; each message has a `chatName` field. Auto-detected by per-message chatName presence.
+2. **Legacy per-chat exports** — Individual WhatsApp JSON files each with `exportInfo.chatName` and `messages` array.
+3. **metrics_report.json** — Pre-computed metrics with `summary`, `crew_metrics`, `daily_breakdown`, `productivity_scores`, `site_visits`.
+4. **_dispatches.json** — OCR dispatch correlation data (auto-skipped during chat discovery).
 
 ## Recent Changes
 - 2026-02-24: Deployment breakdown with crew-location reassignment and map deployment filter
