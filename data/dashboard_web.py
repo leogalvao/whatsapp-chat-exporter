@@ -949,6 +949,12 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
         rev_source = "Invoice" if dep_invoices else "Estimated"
         dep_type = dep_invoices[0].get("deployment_type", "Snow Removal") if dep_invoices else "Snow Removal"
 
+        actual_crew_cost = dep_overrides.get("actual_crew_cost")
+        actual_profit = (dep_revenue - actual_crew_cost) if actual_crew_cost is not None else None
+        actual_margin = (actual_profit / dep_revenue * 100) if actual_crew_cost is not None and dep_revenue > 0 else None
+        spread = (dep_total_cost - actual_crew_cost) if actual_crew_cost is not None else None
+        spread_pct = (spread / actual_crew_cost * 100) if actual_crew_cost and actual_crew_cost > 0 else None
+
         dep_financials.append({
             "deployment": label,
             "type": dep_type,
@@ -969,6 +975,11 @@ def _compute_financials(df, deployments_list, snow_config, pricing_index):
             "profit": round(dep_profit, 2),
             "margin": round(dep_margin, 1),
             "salt_lbs": round(dep_salt_lbs, 0),
+            "actual_crew_cost": round(actual_crew_cost, 2) if actual_crew_cost is not None else None,
+            "actual_profit": round(actual_profit, 2) if actual_profit is not None else None,
+            "actual_margin": round(actual_margin, 1) if actual_margin is not None else None,
+            "spread": round(spread, 2) if spread is not None else None,
+            "spread_pct": round(spread_pct, 1) if spread_pct is not None else None,
         })
 
         total_revenue += dep_revenue
@@ -1890,6 +1901,13 @@ main_content = dbc.Tabs(
             html.Hr(className="my-3"),
             html.H5("Revenue vs Costs by Deployment", className="mb-2"),
             dcc.Graph(id="fin-chart-revenue"),
+            html.Hr(className="my-3"),
+            html.H5("Projected vs Actual Crew Cost — Spread Analysis", className="mb-2"),
+            html.P("Compare your projected costs against the actual crew charges. "
+                   "Enter actual crew costs in the Deployments tab overrides table.",
+                   className="text-muted mb-2", style={"fontSize": "13px"}),
+            html.Div(id="fin-spread-table-container"),
+            dcc.Graph(id="fin-spread-chart"),
             html.Hr(className="my-3"),
             html.H5("Per-Deployment Labor Costs", className="mb-2"),
             html.P("Enter actual labor costs per crew per deployment. Leave blank to use default rates above.",
@@ -5810,6 +5828,7 @@ def render_deployment_overrides(active_tab, _trigger):
             "auto_routes": auto_total,
             "invoice_routes": inv_routes,
             "route_count": dep_ov.get("route_count", ""),
+            "actual_crew_cost": dep_ov.get("actual_crew_cost", ""),
         })
 
     return dash_table.DataTable(
@@ -5822,6 +5841,7 @@ def render_deployment_overrides(active_tab, _trigger):
             {"name": "Chat Routes", "id": "auto_routes"},
             {"name": "Invoice Routes", "id": "invoice_routes"},
             {"name": "Routes Override", "id": "route_count", "type": "numeric", "editable": True},
+            {"name": "Actual Crew Cost ($)", "id": "actual_crew_cost", "type": "numeric", "editable": True},
         ],
         data=rows_data,
         editable=True,
@@ -5860,6 +5880,12 @@ def save_deployment_overrides(n_clicks, table_data):
                     ov[key] = int(float(val))
                 except (ValueError, TypeError):
                     pass
+        val_cost = row.get("actual_crew_cost")
+        if val_cost is not None and val_cost != "":
+            try:
+                ov["actual_crew_cost"] = round(float(val_cost), 2)
+            except (ValueError, TypeError):
+                pass
         if ov:
             deployment_overrides[dep] = ov
 
@@ -6089,6 +6115,8 @@ def _empty_fig(title):
     Output("fin-deployment-table-container", "children"),
     Output("fin-crew-table-container", "children"),
     Output("fin-chart-revenue", "figure"),
+    Output("fin-spread-table-container", "children"),
+    Output("fin-spread-chart", "figure"),
     Input("main-tabs", "active_tab"),
     Input("fin-recalc-btn", "n_clicks"),
     State("fin-labor-sw", "value"),
@@ -6216,10 +6244,80 @@ def update_finances(active_tab, n_clicks, labor_sw, labor_pl, machine_rate,
                             annotations=[{"text": "No financial data", "showarrow": False,
                                          "font": {"size": 16, "color": "gray"}}])
 
+        spread_rows = [d for d in fin["deployment_financials"] if d.get("actual_crew_cost") is not None]
+        if spread_rows:
+            spread_table = dash_table.DataTable(
+                columns=[
+                    {"name": "Deployment", "id": "deployment"},
+                    {"name": "Revenue", "id": "revenue", "type": "numeric"},
+                    {"name": "Projected Cost", "id": "total_cost", "type": "numeric"},
+                    {"name": "Actual Crew Cost", "id": "actual_crew_cost", "type": "numeric"},
+                    {"name": "Spread ($)", "id": "spread", "type": "numeric"},
+                    {"name": "Spread (%)", "id": "spread_pct", "type": "numeric"},
+                    {"name": "Projected Profit", "id": "profit", "type": "numeric"},
+                    {"name": "Actual Profit", "id": "actual_profit", "type": "numeric"},
+                    {"name": "Proj. Margin %", "id": "margin", "type": "numeric"},
+                    {"name": "Actual Margin %", "id": "actual_margin", "type": "numeric"},
+                ],
+                data=spread_rows,
+                style_table={"overflowX": "auto"},
+                style_cell={"textAlign": "left", "padding": "6px", "fontSize": "12px"},
+                style_header={"fontWeight": "bold", "backgroundColor": "#f1f3f5", "fontSize": "12px"},
+                style_data_conditional=[
+                    {"if": {"filter_query": "{spread} > 0", "column_id": "spread"},
+                     "color": "#dc3545", "fontWeight": "bold"},
+                    {"if": {"filter_query": "{spread} < 0", "column_id": "spread"},
+                     "color": "#28a745", "fontWeight": "bold"},
+                    {"if": {"filter_query": "{actual_profit} < 0", "column_id": "actual_profit"},
+                     "color": "#dc3545"},
+                    {"if": {"filter_query": "{actual_profit} >= 0", "column_id": "actual_profit"},
+                     "color": "#28a745"},
+                ],
+                page_size=20,
+            )
+
+            spread_df = pd.DataFrame(spread_rows)
+            spread_fig = go.Figure()
+            spread_fig.add_trace(go.Bar(
+                name="Projected Cost", x=spread_df["deployment"],
+                y=spread_df["total_cost"], marker_color="#fd7e14",
+            ))
+            spread_fig.add_trace(go.Bar(
+                name="Actual Crew Cost", x=spread_df["deployment"],
+                y=spread_df["actual_crew_cost"], marker_color="#dc3545",
+            ))
+            spread_fig.add_trace(go.Bar(
+                name="Revenue", x=spread_df["deployment"],
+                y=spread_df["revenue"], marker_color="#28a745",
+            ))
+            spread_fig.add_trace(go.Bar(
+                name="Actual Profit", x=spread_df["deployment"],
+                y=spread_df["actual_profit"].fillna(0), marker_color="#17a2b8",
+            ))
+            spread_fig.update_layout(
+                barmode="group", template="plotly_white",
+                margin=dict(l=40, r=20, t=30, b=40),
+                legend=dict(orientation="h", y=1.1),
+                yaxis_title="Amount ($)",
+            )
+        else:
+            spread_table = html.P(
+                "No actual crew costs entered yet. Go to the Deployments tab and enter values in the "
+                "'Actual Crew Cost ($)' column, then save and recalculate.",
+                className="text-muted", style={"fontSize": "13px"},
+            )
+            spread_fig = go.Figure()
+            spread_fig.update_layout(
+                template="plotly_white",
+                annotations=[{"text": "Enter actual crew costs in Deployments tab to see spread analysis",
+                             "showarrow": False, "font": {"size": 14, "color": "gray"}}],
+                margin=dict(l=40, r=20, t=30, b=40), height=250,
+            )
+
         return (rev_str, cost_str, profit_str, {"color": profit_color},
                 margin_str, {"color": margin_color},
                 sites_str, salt_str, cost_hr_str, rev_dep_str,
-                dep_table, crew_table, fig)
+                dep_table, crew_table, fig, spread_table, spread_fig)
     except Exception as e:
         print(f"[Finances] Error: {e}")
         import traceback; traceback.print_exc()
@@ -6228,6 +6326,8 @@ def update_finances(active_tab, n_clicks, labor_sw, labor_pl, machine_rate,
         return ("$0", "$0", "$0", {}, "0%", {}, "0 / 0", "0", "$0", "$0",
                 html.P("Error computing financials.", className="text-muted"),
                 html.P("Error computing financials.", className="text-muted"),
+                empty_fig,
+                html.P("Error.", className="text-muted"),
                 empty_fig)
 
 

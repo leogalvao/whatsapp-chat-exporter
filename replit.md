@@ -18,7 +18,7 @@ The web dashboard is organized into 9 main tabs:
 - **Crew Analysis**: Per-sender metrics, message gaps, route timelines.
 - **Deployments**: Summary, timeline, cross-deployment comparison, downloadable HTML reports, breakdown with crew-location reassignment, per-deployment overrides (crew sizes, route counts).
 - **Operations**: Routing Gantt chart, deployment burn-down (supports route overrides), traffic analysis, recall detection.
-- **Finances**: Revenue forecasting, cost analysis, profit metrics, invoice reconciliation.
+- **Finances**: Revenue forecasting, cost analysis, profit metrics, invoice reconciliation, projected vs actual crew cost spread analysis.
 - **Map**: DC Service Map with OpenStreetMap tiles, location color-coding by crew, deployment filtering, marker clustering.
 - **Data Quality**: Noise filtering, raw message data.
 - **Settings**: Crew assignment configuration, sender management, expected hours, service times, location registry upload, invoice upload.
@@ -32,7 +32,8 @@ Key dashboard features include:
 - Automatic location type inference and trackable sender filtering.
 - Deployment burn-down charts scaled by crew size, with elapsed-hours overlay for cross-deployment comparison.
 - Deployment time windows: configurable start/end date+time per deployment (Settings tab), stored in `deployment_time_windows` config; controls which messages belong to each deployment.
-- Per-deployment overrides for crew sizes (SW/PL workers) and total route count (single field matching invoice format), saved to config.
+- Per-deployment overrides for crew sizes (SW/PL workers), total route count (single field matching invoice format), and actual crew cost, saved to config.
+- Spread analysis: compares projected costs vs actual crew charges per deployment, showing spread ($/%​), projected vs actual profit, and margin comparison in both table and chart form.
 - Map marker clustering (per-crew, auto-clusters at lower zoom levels).
 - Crew merging capabilities for consistent tracking.
 - Drag-and-drop file upload for various data formats.
