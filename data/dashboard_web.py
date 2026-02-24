@@ -20,6 +20,7 @@ from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
+import plotly
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -4688,30 +4689,46 @@ def chart_burndown(chats, senders, quality, msg_types, time_range,
         if burndown.empty:
             return _empty_fig("Deployment Burn-Down")
         fig = go.Figure()
-        for dep_label in burndown["deployment"].unique():
+        colors = plotly.colors.qualitative.Set2
+        for idx, dep_label in enumerate(burndown["deployment"].unique()):
             dep_data = burndown[burndown["deployment"] == dep_label]
             crew_count = int(dep_data["crew_count"].iloc[0]) if "crew_count" in dep_data.columns and not dep_data.empty else 1
             total_sites = int(dep_data["cumulative_completed"].max()) if not dep_data.empty else 0
             base_hrs = SNOW_CONFIG.get("expected_deployment_hours", 12.0)
             adj_hrs = base_hrs / max(crew_count, 1)
+            color = colors[idx % len(colors)]
+            x_vals = dep_data["elapsed_hours"] if "elapsed_hours" in dep_data.columns else dep_data["timestamp"]
+            hover_texts = [
+                f"{dep_label}<br>Site {row['cumulative_completed']}/{total_sites}<br>"
+                f"Elapsed: {row.get('elapsed_hours', 0):.1f}h<br>"
+                f"Time: {row['timestamp'].strftime('%m/%d %I:%M %p') if hasattr(row['timestamp'], 'strftime') else row['timestamp']}"
+                for _, row in dep_data.iterrows()
+            ]
             fig.add_trace(go.Scatter(
-                x=dep_data["timestamp"], y=dep_data["cumulative_completed"],
+                x=x_vals, y=dep_data["cumulative_completed"],
                 mode="lines+markers",
                 name=f"{dep_label} actual ({crew_count} crews, {total_sites} sites)",
-                line=dict(dash="solid"),
+                line=dict(dash="solid", color=color),
+                marker=dict(size=4, color=color),
+                hovertext=hover_texts,
+                hoverinfo="text",
             ))
+            expected_x = dep_data["elapsed_hours"] if "elapsed_hours" in dep_data.columns else dep_data["timestamp"]
             fig.add_trace(go.Scatter(
-                x=dep_data["timestamp"], y=dep_data["expected_completed"],
+                x=expected_x, y=dep_data["expected_completed"],
                 mode="lines",
                 name=f"{dep_label} expected ({adj_hrs:.1f}h adj.)",
-                line=dict(dash="dash"),
+                line=dict(dash="dash", color=color, width=1),
+                showlegend=True,
             ))
         fig.update_layout(
-            title="Deployment Burn-Down: Actual vs Expected (crew-adjusted)",
-            xaxis_title="Time", yaxis_title="Cumulative Sites Completed",
+            title="Deployment Burn-Down: Actual vs Expected (overlapping, crew-adjusted)",
+            xaxis_title="Elapsed Hours Since Deployment Start",
+            yaxis_title="Cumulative Sites Completed",
             margin=dict(l=10, r=10, t=40, b=10),
             height=450,
             legend=dict(font=dict(size=11)),
+            hovermode="closest",
         )
         return fig
     except Exception as e:

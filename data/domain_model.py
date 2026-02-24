@@ -486,7 +486,7 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
         expected_completed, pct_complete, crew_count.
     """
     cols = [
-        "deployment", "timestamp", "cumulative_completed",
+        "deployment", "timestamp", "elapsed_hours", "cumulative_completed",
         "expected_completed", "pct_complete", "crew_count",
     ]
 
@@ -542,6 +542,7 @@ def build_deployment_burndown(job_logs_df, deployments_list, config):
             rows.append({
                 "deployment": label,
                 "timestamp": ts,
+                "elapsed_hours": round(elapsed_hours, 3),
                 "cumulative_completed": i,
                 "expected_completed": round(expected, 2),
                 "pct_complete": round(pct, 2),
